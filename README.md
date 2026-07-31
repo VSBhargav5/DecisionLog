@@ -3,7 +3,7 @@
 **Turn messy meeting notes into a living decision log.**
 
 Most meeting tools capture *what was said*.  
-DecisionLog captures **what was decided**, **who owns it**, and **when it is due** — then keeps it searchable forever.
+DecisionLog captures **what was decided**, **who owns it**, and **when it is due** — then keeps it searchable and updatable.
 
 ---
 
@@ -16,184 +16,182 @@ After almost every meeting:
 - Deadlines are vague (“next week”) or missing
 - Three weeks later nobody remembers *why* a decision was made or who is accountable
 
-Existing tools either:
-- Dump the full transcript (noise)
-- Extract generic “action items” with weak ownership
-- Require manual structuring that nobody does consistently
+Existing tools either dump the full transcript, extract weak action items, or require manual structuring that nobody maintains.
 
-**DecisionLog solves the overlooked middle layer**: reliable extraction of *decisions* + *owned actions* into a clean, queryable log.
+**DecisionLog focuses on the overlooked middle layer**: reliable extraction of *decisions* + *owned actions* into a clean, queryable, updatable log.
 
 ---
 
-## What it does
+## What it does (v0.2)
 
-1. Takes a meeting transcript or notes (plain text / markdown)
+1. Takes a meeting transcript or notes
 2. Uses an LLM to extract:
-   - **Decisions** (what was actually decided, not just discussed)
-   - **Action items** with clear owners and deadlines
-   - Confidence scores and supporting evidence from the text
-3. Stores everything in a local decision log (SQLite)
-4. Lets you list, search, and update status later
+   - **Decisions** (only what was actually decided)
+   - **Action items** with explicit owners and deadlines
+   - Evidence quotes + confidence scores
+3. **Normalizes relative deadlines** (“next Friday”, “end of month”, “in 2 weeks”) into concrete dates
+4. Stores everything in a local SQLite decision log
+5. Supports **re-running** extraction on the same meeting (replace mode)
+6. Lets you **update status** of actions/decisions and **export** to Markdown
 
 ---
 
 ## Why this can become a product
 
-- Every knowledge worker has this pain multiple times per week
+- Every knowledge worker hits this pain multiple times per week
 - High willingness to pay for “decisions that don’t disappear”
-- Natural expansion path:
-  - Slack / Teams / Zoom bot
-  - Notion / Linear / Jira push
-  - Team shared decision logs
-  - Decision impact tracking over time
-- The hard part is reliable extraction + ownership resolution — not the UI
+- Natural expansion path: Slack/Teams bot → Notion/Linear push → shared team logs → impact tracking
+- The hard part is reliable extraction + ownership + deadline handling — not the UI
 
 ---
 
-## Architecture (v0.1)
+## Architecture
 
 ```
 Transcript / Notes
         │
         ▼
-┌───────────────────────┐
-│   Extractor (LLM)     │  ← Structured output + evidence
-│  - Decisions          │
-│  - Action Items       │
-│  - Owners & Deadlines │
-└───────────┬───────────┘
-            │
-            ▼
-┌───────────────────────┐
-│   Decision Store      │  ← SQLite (local, simple, portable)
-│  - decisions          │
-│  - action_items       │
-│  - meeting metadata   │
-└───────────────────────┘
-            │
-            ▼
-      CLI / Python API
+┌────────────────────────────┐
+│   Extractor (LLM)          │
+│  - Strict decision rules   │
+│  - Ownership resolution    │
+│  - Deadline phrases        │
+└────────────┬───────────────┘
+             │
+             ▼
+┌────────────────────────────┐
+│   Deadline Normalizer      │  ← “next Friday” → 2026-08-07
+└────────────┬───────────────┘
+             │
+             ▼
+┌────────────────────────────┐
+│   Decision Store (SQLite)  │
+│  - meetings                │
+│  - decisions + status      │
+│  - action items + owner    │
+└────────────┬───────────────┘
+             │
+             ▼
+      CLI (extract / list / status / export)
 ```
 
 Design principles:
-- **Structured output first** (not free-form text)
-- **Evidence linked** to every extracted item
-- **Idempotent-ish** – re-running on the same meeting updates rather than duplicates blindly
-- **Local-first** – works offline once the model call is done
-- Minimal dependencies
+- Structured output first
+- Evidence linked to every item
+- Re-runnable (replace mode for the same meeting title)
+- Local-first
+- Focused code, no bloat
 
 ---
 
 ## Quick Start
 
-### 1. Install
-
 ```bash
 git clone https://github.com/VSBhargav5/DecisionLog.git
 cd DecisionLog
 pip install -r requirements.txt
+
+export OPENAI_API_KEY="sk-..."   # or any OpenAI-compatible endpoint
 ```
 
-### 2. Set your LLM key
+### Extract
 
 ```bash
-export OPENAI_API_KEY="sk-..."          # or
-export ANTHROPIC_API_KEY="..."          # or use any OpenAI-compatible endpoint
+python -m decisionlog extract examples/sample_meeting.txt \
+  -m "Sprint Planning 31 Jul" \
+  --date 2026-07-31
 ```
 
-(You can also pass `--model` and base URL later.)
-
-### 3. Extract from a meeting
+Re-run / replace an existing meeting:
 
 ```bash
-python -m decisionlog extract path/to/meeting_notes.txt --meeting "Sprint Planning 31 Jul"
+python -m decisionlog extract examples/sample_meeting.txt \
+  -m "Sprint Planning 31 Jul" \
+  --date 2026-07-31 \
+  --replace
 ```
 
-### 4. View the decision log
+### List
 
 ```bash
-python -m decisionlog list
-python -m decisionlog list --status open
+python -m decisionlog list actions
+python -m decisionlog list actions --status open --owner Sarah
+python -m decisionlog list decisions
+python -m decisionlog list meetings
+```
+
+### Update status
+
+```bash
+# Use full ID or first 8 characters
+python -m decisionlog status <id> done
+python -m decisionlog status <id> in_progress --owner Sarah
+python -m decisionlog status <id> reversed --kind decision
+```
+
+### Export Markdown
+
+```bash
+python -m decisionlog export
+python -m decisionlog export -o decision_log.md
 ```
 
 ---
 
 ## Example
 
-**Input (meeting notes):**
+**Input:**
 ```text
-We discussed the new onboarding flow.
-After debate, we decided to drop the phone verification step for now.
+We decided to remove mandatory phone verification.
 Sarah will own the implementation and ship it by next Friday.
-John will update the analytics dashboard to track drop-off.
-We also agreed that the pricing page experiment stays live for another two weeks.
+John will update the analytics dashboard.
+We agreed the pricing experiment stays live for another two weeks.
 ```
 
-**Extracted:**
-
-**Decisions**
-- Drop phone verification step from onboarding (for now)
-- Keep pricing page experiment live for another two weeks
-
-**Action Items**
-- Sarah → Implement removal of phone verification → Due: next Friday
-- John → Update analytics dashboard for drop-off tracking → Due: (none specified)
+**Result:**
+- Decisions: remove mandatory phone verification; keep pricing experiment live another two weeks
+- Actions:
+  - Sarah → implement removal → due: concrete date (normalized from “next Friday”)
+  - John → update analytics dashboard
 
 ---
 
 ## Project Structure
 
 ```
-DecisionLog/
-├── README.md
-├── requirements.txt
-├── pyproject.toml
-├── src/
-│   └── decisionlog/
-│       ├── __init__.py
-│       ├── __main__.py          # CLI entry
-│       ├── extractor.py         # LLM extraction + structured output
-│       ├── models.py            # Pydantic models
-│       ├── store.py             # SQLite persistence
-│       └── cli.py
-├── examples/
-│   └── sample_meeting.txt
-└── tests/
+src/decisionlog/
+├── __init__.py
+├── __main__.py
+├── cli.py              # extract / list / status / export
+├── extractor.py        # LLM + ownership rules
+├── dates.py            # relative deadline → concrete date
+├── models.py           # Pydantic models
+└── store.py            # SQLite + re-run + status + markdown export
 ```
 
 ---
 
-## Roadmap (honest)
+## Roadmap
 
-**v0.1 (this)**  
-Core extraction + local store + CLI
-
-**v0.2**  
-Better ownership resolution, deadline normalization, re-run / update logic, export to Markdown/JSON
+**v0.2 (current)**  
+Deadline normalization • ownership cleanup • re-run/replace • status updates • Markdown export
 
 **v0.3**  
-Simple web UI + shared team log
+Better fuzzy matching on re-run • JSON export • simple filters by date range
 
 **Later**  
-Slack bot, Notion sync, decision status workflows, impact tracking
+Slack bot, Notion/Linear sync, shared team log, decision impact tracking
 
 ---
 
 ## Tech Stack
 
-- Python 3.11+
-- Pydantic (structured output)
-- SQLite (zero-config store)
-- OpenAI / Anthropic / any OpenAI-compatible API
-- Typer (CLI)
+Python 3.11+ • Pydantic • SQLite • OpenAI-compatible APIs • Typer • python-dateutil • Rich
 
 ---
 
 ## License
 
-MIT – use it, fork it, build on it.
+MIT
 
----
-
-Built as a real product experiment, not a toy demo.  
-The goal is a tool people would actually open every week after meetings.
+Built as a real product experiment — not a toy demo.
