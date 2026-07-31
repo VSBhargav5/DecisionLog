@@ -30,6 +30,7 @@ class Decision(BaseModel):
     evidence: Optional[str] = Field(None, description="Short quote or paraphrase from the source")
     confidence: float = Field(0.8, ge=0.0, le=1.0)
     created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
 
 
 class ActionItem(BaseModel):
@@ -38,16 +39,17 @@ class ActionItem(BaseModel):
     text: str = Field(..., description="What needs to be done")
     owner: Optional[str] = Field(None, description="Person responsible")
     due_date: Optional[date] = None
-    due_text: Optional[str] = Field(None, description="Original deadline phrase if not normalized")
+    due_text: Optional[str] = Field(None, description="Original deadline phrase")
     status: ActionStatus = ActionStatus.OPEN
     evidence: Optional[str] = None
     confidence: float = Field(0.8, ge=0.0, le=1.0)
     linked_decision_id: Optional[str] = None
     created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
 
 
 class ExtractionResult(BaseModel):
-    """What the LLM is asked to return."""
+    """Structured result returned by the extractor."""
     decisions: list[Decision] = Field(default_factory=list)
     action_items: list[ActionItem] = Field(default_factory=list)
     meeting_summary: Optional[str] = None
