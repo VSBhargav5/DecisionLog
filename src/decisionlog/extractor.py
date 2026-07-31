@@ -1,73 +1,61 @@
 from __future__ import annotations
 
 import json
-import os
+from datetime import date
 from typing import Optional
 
 from openai import OpenAI
-from pydantic import ValidationError
 
+from .dates import normalize_deadline
 from .models import ActionItem, Decision, ExtractionResult
 
 
-SYSTEM_PROMPT = """You are an expert at extracting decisions and action items from meeting notes and transcripts.
+SYSTEM_PROMPT = """You are an expert at extracting *decisions* and *owned action items* from meeting notes and transcripts.
+
+Your job is to produce a clean, accountable record — not a summary of discussion.
 
 Rules:
-1. Only extract things that were clearly *decided* or *assigned*. Do not invent items.
-2. A Decision is a choice the group made (e.g. "We will drop phone verification").
-3. An Action Item is concrete work with (ideally) an owner and a deadline.
-4. Prefer short, precise language. Remove filler.
-5. Always attach a short evidence quote or paraphrase from the source text.
-6. If ownership is unclear, set owner to null rather than guessing a name.
-7. If a deadline is relative ("next Friday", "end of month"), keep the original phrase in due_text and try to normalize due_date only when confident.
-8. Return valid JSON matching the schema. No extra commentary.
+
+1. DECISIONS
+   - Only extract things the group clearly *decided* or *agreed*.
+   - Ignore pure discussion, ideas, or open questions.
+   - Phrase each decision as a short, definitive statement.
+
+2. ACTION ITEMS
+   - Must be concrete work someone will do.
+   - Prefer explicit owners. If the text says "Sarah will..." or "John to update...", capture the name.
+   - If ownership is vague ("someone should", "we need to", "the team"), set owner to null. Do not invent names.
+   - Capture deadline phrases exactly as spoken ("next Friday", "end of month", "by the 15th").
+
+3. EVIDENCE
+   - Every item must include a short evidence quote or close paraphrase from the source.
+
+4. CONFIDENCE
+   - 0.9–1.0 = explicit and unambiguous
+   - 0.7–0.85 = reasonably clear
+   - below 0.7 = somewhat inferred (use sparingly)
+
+5. OUTPUT
+   - Return valid JSON only. No commentary.
+   - Schema:
+     {
+       "meeting_summary": "one short sentence",
+       "decisions": [{"text": "...", "evidence": "...", "confidence": 0.9}],
+       "action_items": [{"text": "...", "owner": "Name or null", "due_text": "... or null", "evidence": "...", "confidence": 0.9}]
+     }
 """
-
-
-EXTRACTION_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "meeting_summary": {"type": "string"},
-        "decisions": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "text": {"type": "string"},
-                    "evidence": {"type": "string"},
-                    "confidence": {"type": "number"},
-                },
-                "required": ["text"],
-            },
-        },
-        "action_items": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "text": {"type": "string"},
-                    "owner": {"type": ["string", "null"]},
-                    "due_text": {"type": ["string", "null"]},
-                    "evidence": {"type": "string"},
-                    "confidence": {"type": "number"},
-                },
-                "required": ["text"],
-            },
-        },
-    },
-    "required": ["decisions", "action_items"],
-}
 
 
 def extract(
     text: str,
     meeting_id: str,
     *,
+    reference_date: Optional[date] = None,
     model: str = "gpt-4o-mini",
     api_key: Optional[str] = None,
     base_url: Optional[str] = None,
 ) -> ExtractionResult:
-    """Run extraction against the given meeting text."""
+    """Extract decisions and action items, then normalize deadlines."""
 
     client_kwargs = {}
     if api_key:
@@ -75,10 +63,12 @@ def extract(
     if base_url:
         client_kwargs["base_url"] = base_url
 
-    # Falls back to OPENAI_API_KEY / ANTHROPIC etc. via environment
     client = OpenAI(**client_kwargs)
 
-    user_content = f"""Meeting text:\n\n{text}\n\nExtract decisions and action items. Return only JSON."""
+    user_content = (
+        f"Meeting text:\n\n{text}\n\n"
+        "Extract only clear decisions and owned action items. Return JSON."
+    )
 
     response = client.chat.completions.create(
         model=model,
@@ -99,27 +89,38 @@ def extract(
     except json.JSONDecodeError as e:
         raise RuntimeError(f"Model returned invalid JSON: {e}") from e
 
-    # Attach meeting_id and build full models
-    decisions = []
-    for d in data.get("decisions", []):
-        decisions.append(
-            Decision(
-                meeting_id=meeting_id,
-                text=d["text"],
-                evidence=d.get("evidence"),
-                confidence=float(d.get("confidence", 0.8)),
-            )
+    ref = reference_date or date.today()
+
+    decisions = [
+        Decision(
+            meeting_id=meeting_id,
+            text=d["text"].strip(),
+            evidence=(d.get("evidence") or "").strip() or None,
+            confidence=float(d.get("confidence", 0.8)),
         )
+        for d in data.get("decisions", [])
+        if d.get("text")
+    ]
 
     actions = []
     for a in data.get("action_items", []):
+        if not a.get("text"):
+            continue
+        due_text = (a.get("due_text") or "").strip() or None
+        due_date, _ = normalize_deadline(due_text, reference=ref)
+        owner = (a.get("owner") or "").strip() or None
+        # Light ownership cleanup: reject generic placeholders the model sometimes leaks
+        if owner and owner.lower() in {"someone", "the team", "team", "tbd", "n/a", "null"}:
+            owner = None
+
         actions.append(
             ActionItem(
                 meeting_id=meeting_id,
-                text=a["text"],
-                owner=a.get("owner"),
-                due_text=a.get("due_text"),
-                evidence=a.get("evidence"),
+                text=a["text"].strip(),
+                owner=owner,
+                due_text=due_text,
+                due_date=due_date,
+                evidence=(a.get("evidence") or "").strip() or None,
                 confidence=float(a.get("confidence", 0.8)),
             )
         )
@@ -127,5 +128,5 @@ def extract(
     return ExtractionResult(
         decisions=decisions,
         action_items=actions,
-        meeting_summary=data.get("meeting_summary"),
+        meeting_summary=(data.get("meeting_summary") or "").strip() or None,
     )
