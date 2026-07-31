@@ -15,7 +15,7 @@ app = typer.Typer(help="DecisionLog – extract and track decisions from meeting
 console = Console()
 
 
-@app.command()
+@app.command("extract")
 def extract_cmd(
     file: Path = typer.Argument(..., help="Path to meeting notes / transcript"),
     meeting: str = typer.Option(..., "--meeting", "-m", help="Meeting title"),
@@ -33,12 +33,7 @@ def extract_cmd(
     console.print(f"[bold]Extracting from[/bold] {file.name} ...")
     result = extract(text, meeting_id=meeting_id, model=model)
 
-    store = DecisionStore(db or DecisionStore.DEFAULT_DB if hasattr(DecisionStore, "DEFAULT_DB") else None)
-    # Fix: use default properly
-    store = DecisionStore()
-    if db:
-        store = DecisionStore(db)
-
+    store = DecisionStore(db) if db else DecisionStore()
     store.save_extraction(meeting_id, meeting, result)
 
     console.print(f"\n[green]Saved meeting:[/green] {meeting}")
