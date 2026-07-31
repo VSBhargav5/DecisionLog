@@ -1,0 +1,17 @@
+Sprint Planning – 31 July 2026
+
+Attendees: Sarah, John, Priya, Alex
+
+We reviewed the onboarding funnel numbers. Drop-off after the phone verification step is still high (38%).
+
+After discussion we decided to remove the mandatory phone verification for the next release. We will keep it as an optional step instead.
+
+Sarah will own the implementation of this change and aims to ship it by next Friday.
+
+John will update the product analytics dashboard so we can track the new optional verification rate and overall completion.
+
+Priya raised the pricing page A/B test. We agreed to keep the current experiment running for another two weeks before making a call.
+
+Alex will prepare a short write-up of the decision rationale for the product changelog.
+
+No other major decisions were made.
