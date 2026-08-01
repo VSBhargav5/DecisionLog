@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from datetime import date, datetime
 from pathlib import Path
 from typing import Optional
 
-from .models import ActionItem, ActionStatus, Decision, DecisionStatus, ExtractionResult
+from .models import ActionStatus, DecisionStatus, ExtractionResult
 
 
 DEFAULT_DB = Path.home() / ".decisionlog" / "decisions.db"
@@ -64,6 +65,8 @@ class DecisionStore:
                 );
 
                 CREATE INDEX IF NOT EXISTS idx_meetings_title ON meetings(title);
+                CREATE INDEX IF NOT EXISTS idx_decisions_meeting ON decisions(meeting_id);
+                CREATE INDEX IF NOT EXISTS idx_actions_meeting ON action_items(meeting_id);
                 CREATE INDEX IF NOT EXISTS idx_actions_status ON action_items(status);
                 CREATE INDEX IF NOT EXISTS idx_actions_owner ON action_items(owner);
                 """
@@ -191,12 +194,25 @@ class DecisionStore:
 
     # ── Read ──────────────────────────────────────────────────
 
-    def list_decisions(self, status: Optional[str] = None) -> list[dict]:
-        query = "SELECT d.*, m.title AS meeting_title FROM decisions d JOIN meetings m ON d.meeting_id = m.id"
+    def list_decisions(
+        self,
+        status: Optional[str] = None,
+        meeting_id: Optional[str] = None,
+    ) -> list[dict]:
+        query = (
+            "SELECT d.*, m.title AS meeting_title "
+            "FROM decisions d JOIN meetings m ON d.meeting_id = m.id"
+        )
+        clauses: list[str] = []
         params: list = []
         if status:
-            query += " WHERE d.status = ?"
+            clauses.append("d.status = ?")
             params.append(status)
+        if meeting_id:
+            clauses.append("d.meeting_id = ?")
+            params.append(meeting_id)
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
         query += " ORDER BY d.created_at DESC"
         with self._connect() as conn:
             return [dict(r) for r in conn.execute(query, params).fetchall()]
@@ -205,9 +221,13 @@ class DecisionStore:
         self,
         status: Optional[str] = None,
         owner: Optional[str] = None,
+        meeting_id: Optional[str] = None,
     ) -> list[dict]:
-        query = "SELECT a.*, m.title AS meeting_title FROM action_items a JOIN meetings m ON a.meeting_id = m.id"
-        clauses = []
+        query = (
+            "SELECT a.*, m.title AS meeting_title "
+            "FROM action_items a JOIN meetings m ON a.meeting_id = m.id"
+        )
+        clauses: list[str] = []
         params: list = []
         if status:
             clauses.append("a.status = ?")
@@ -215,6 +235,9 @@ class DecisionStore:
         if owner:
             clauses.append("a.owner = ?")
             params.append(owner)
+        if meeting_id:
+            clauses.append("a.meeting_id = ?")
+            params.append(meeting_id)
         if clauses:
             query += " WHERE " + " AND ".join(clauses)
         query += " ORDER BY a.created_at DESC"
@@ -231,16 +254,40 @@ class DecisionStore:
     def get_decision(self, item_id: str) -> Optional[dict]:
         with self._connect() as conn:
             row = conn.execute(
-                "SELECT * FROM decisions WHERE id = ?", (item_id,)
+                "SELECT d.*, m.title AS meeting_title "
+                "FROM decisions d LEFT JOIN meetings m ON d.meeting_id = m.id "
+                "WHERE d.id = ?",
+                (item_id,),
             ).fetchone()
             return dict(row) if row else None
 
     def get_action(self, item_id: str) -> Optional[dict]:
         with self._connect() as conn:
             row = conn.execute(
-                "SELECT * FROM action_items WHERE id = ?", (item_id,)
+                "SELECT a.*, m.title AS meeting_title "
+                "FROM action_items a LEFT JOIN meetings m ON a.meeting_id = m.id "
+                "WHERE a.id = ?",
+                (item_id,),
             ).fetchone()
             return dict(row) if row else None
+
+    def resolve_id(self, short_or_full: str, kind: str) -> Optional[dict]:
+        """Resolve full UUID or 8-char prefix for action/decision."""
+        if kind == "decision":
+            item = self.get_decision(short_or_full)
+            if item:
+                return item
+            for row in self.list_decisions():
+                if row["id"].startswith(short_or_full):
+                    return row
+        else:
+            item = self.get_action(short_or_full)
+            if item:
+                return item
+            for row in self.list_actions():
+                if row["id"].startswith(short_or_full):
+                    return row
+        return None
 
     # ── Status updates ────────────────────────────────────────
 
@@ -305,18 +352,13 @@ class DecisionStore:
             if m.get("summary"):
                 lines.append(f"\n{m['summary']}\n")
 
-            decisions = [
-                d for d in self.list_decisions() if d["meeting_id"] == m["id"]
-            ]
-            actions = [
-                a for a in self.list_actions() if a["meeting_id"] == m["id"]
-            ]
+            decisions = self.list_decisions(meeting_id=m["id"])
+            actions = self.list_actions(meeting_id=m["id"])
 
             if decisions:
                 lines.append("### Decisions")
                 for d in decisions:
-                    status = d["status"]
-                    lines.append(f"- **[{status}]** {d['text']}")
+                    lines.append(f"- **[{d['status']}]** {d['text']}")
                     if d.get("evidence"):
                         lines.append(f"  - _{d['evidence']}_")
                 lines.append("")
@@ -326,8 +368,9 @@ class DecisionStore:
                 for a in actions:
                     owner = a.get("owner") or "unassigned"
                     due = a.get("due_date") or a.get("due_text") or "—"
-                    status = a["status"]
-                    lines.append(f"- **[{status}]** [{owner}] {a['text']} (due: {due})")
+                    lines.append(
+                        f"- **[{a['status']}]** [{owner}] {a['text']} (due: {due})"
+                    )
                     if a.get("evidence"):
                         lines.append(f"  - _{a['evidence']}_")
                 lines.append("")
@@ -335,3 +378,22 @@ class DecisionStore:
             lines.append("---\n")
 
         return "\n".join(lines).rstrip() + "\n"
+
+    def export_json(self) -> str:
+        meetings = self.list_meetings()
+        payload = []
+        for m in meetings:
+            payload.append(
+                {
+                    "meeting": {
+                        "id": m["id"],
+                        "title": m["title"],
+                        "summary": m.get("summary"),
+                        "meeting_date": m.get("meeting_date"),
+                        "created_at": m.get("created_at"),
+                    },
+                    "decisions": self.list_decisions(meeting_id=m["id"]),
+                    "action_items": self.list_actions(meeting_id=m["id"]),
+                }
+            )
+        return json.dumps(payload, indent=2, default=str)
