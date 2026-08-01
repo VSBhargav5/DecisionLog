@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import uuid
-from datetime import date, datetime
+from datetime import date
 from pathlib import Path
 from typing import Optional
 
 import typer
 from rich.console import Console
+from rich.panel import Panel
 from rich.table import Table
 
 from .extractor import extract
@@ -28,11 +29,11 @@ def extract_cmd(
     file: Path = typer.Argument(..., help="Path to meeting notes / transcript"),
     meeting: str = typer.Option(..., "--meeting", "-m", help="Meeting title"),
     meeting_date: Optional[str] = typer.Option(
-        None, "--date", "-d", help="Meeting date YYYY-MM-DD (used for relative deadlines)"
+        None, "--date", "-d", help="Meeting date YYYY-MM-DD (for relative deadlines)"
     ),
     model: str = typer.Option("gpt-4o-mini", "--model", help="LLM model name"),
     replace: bool = typer.Option(
-        False, "--replace", help="If a meeting with this title exists, replace its items (re-run)"
+        False, "--replace", help="Replace existing meeting with same title (re-run)"
     ),
     db: Optional[Path] = typer.Option(None, "--db", help="Custom SQLite path"),
 ):
@@ -41,7 +42,11 @@ def extract_cmd(
         console.print(f"[red]File not found: {file}[/red]")
         raise typer.Exit(1)
 
-    text = file.read_text(encoding="utf-8")
+    text = file.read_text(encoding="utf-8").strip()
+    if not text:
+        console.print("[red]File is empty[/red]")
+        raise typer.Exit(1)
+
     ref_date = date.today()
     if meeting_date:
         try:
@@ -69,6 +74,12 @@ def extract_cmd(
         model=model,
     )
 
+    if not result.decisions and not result.action_items:
+        console.print(
+            "[yellow]No decisions or action items extracted. "
+            "Check that the notes contain clear decisions/assignments.[/yellow]"
+        )
+
     used_id = store.save_extraction(
         meeting_id,
         meeting,
@@ -79,6 +90,7 @@ def extract_cmd(
 
     action = "Updated" if (existing and replace) else "Saved"
     console.print(f"\n[green]{action} meeting:[/green] {meeting}")
+    console.print(f"  ID        : {used_id[:8]}…")
     console.print(f"  Decisions : {len(result.decisions)}")
     console.print(f"  Actions   : {len(result.action_items)}")
 
@@ -100,13 +112,23 @@ def list_cmd(
     kind: str = typer.Argument("actions", help="actions | decisions | meetings"),
     status: Optional[str] = typer.Option(None, "--status", "-s"),
     owner: Optional[str] = typer.Option(None, "--owner", "-o"),
+    meeting: Optional[str] = typer.Option(
+        None, "--meeting", "-m", help="Filter by meeting title (exact match)"
+    ),
     db: Optional[Path] = typer.Option(None, "--db"),
 ):
     """List items from the decision log."""
     store = _store(db)
+    meeting_id = None
+    if meeting:
+        m = store.find_meeting_by_title(meeting)
+        if not m:
+            console.print(f"[red]No meeting titled '{meeting}'[/red]")
+            raise typer.Exit(1)
+        meeting_id = m["id"]
 
     if kind == "decisions":
-        rows = store.list_decisions(status=status)
+        rows = store.list_decisions(status=status, meeting_id=meeting_id)
         table = Table(title="Decisions")
         table.add_column("ID", style="dim", max_width=8)
         table.add_column("Text")
@@ -115,9 +137,11 @@ def list_cmd(
         for r in rows:
             table.add_row(r["id"][:8], r["text"], r["status"], r.get("meeting_title", ""))
         console.print(table)
+        if not rows:
+            console.print("[dim]No decisions found.[/dim]")
 
     elif kind == "actions":
-        rows = store.list_actions(status=status, owner=owner)
+        rows = store.list_actions(status=status, owner=owner, meeting_id=meeting_id)
         table = Table(title="Action Items")
         table.add_column("ID", style="dim", max_width=8)
         table.add_column("Owner")
@@ -134,24 +158,62 @@ def list_cmd(
                 r["status"],
             )
         console.print(table)
+        if not rows:
+            console.print("[dim]No action items found.[/dim]")
 
     elif kind == "meetings":
         rows = store.list_meetings()
         table = Table(title="Meetings")
+        table.add_column("ID", style="dim", max_width=8)
         table.add_column("Title")
         table.add_column("Date")
         table.add_column("Created")
         for r in rows:
             table.add_row(
+                r["id"][:8],
                 r["title"],
                 r.get("meeting_date") or "—",
                 r["created_at"][:19],
             )
         console.print(table)
+        if not rows:
+            console.print("[dim]No meetings yet. Run extract first.[/dim]")
 
     else:
         console.print("[red]kind must be one of: actions, decisions, meetings[/red]")
         raise typer.Exit(1)
+
+
+@app.command("show")
+def show_cmd(
+    item_id: str = typer.Argument(..., help="Full or short ID"),
+    kind: str = typer.Option("action", "--kind", "-k", help="action | decision"),
+    db: Optional[Path] = typer.Option(None, "--db"),
+):
+    """Show full details for one decision or action item."""
+    store = _store(db)
+    item = store.resolve_id(item_id, kind)
+    if not item:
+        console.print(f"[red]{kind.capitalize()} not found: {item_id}[/red]")
+        raise typer.Exit(1)
+
+    title = item.get("meeting_title") or item.get("meeting_id", "")[:8]
+    body_lines = [
+        f"[bold]{item['text']}[/bold]",
+        "",
+        f"Status     : {item['status']}",
+        f"Meeting    : {title}",
+        f"Confidence : {item.get('confidence', '—')}",
+        f"ID         : {item['id']}",
+    ]
+    if kind == "action":
+        body_lines.insert(2, f"Owner      : {item.get('owner') or '(unassigned)'}")
+        due = item.get("due_date") or item.get("due_text") or "—"
+        body_lines.insert(3, f"Due        : {due}")
+    if item.get("evidence"):
+        body_lines.extend(["", f"Evidence   : {item['evidence']}"])
+
+    console.print(Panel("\n".join(body_lines), title=kind.capitalize(), border_style="blue"))
 
 
 @app.command("status")
@@ -164,37 +226,25 @@ def status_cmd(
 ):
     """Update status of an action item or decision."""
     store = _store(db)
-
-    # Allow short IDs (first 8 chars)
-    def resolve(get_fn, list_fn):
-        item = get_fn(item_id)
-        if item:
-            return item
-        # try prefix match
-        for row in list_fn():
-            if row["id"].startswith(item_id):
-                return row
-        return None
+    item = store.resolve_id(item_id, kind)
+    if not item:
+        console.print(f"[red]{kind.capitalize()} not found: {item_id}[/red]")
+        raise typer.Exit(1)
 
     if kind == "decision":
-        item = resolve(store.get_decision, store.list_decisions)
-        if not item:
-            console.print(f"[red]Decision not found: {item_id}[/red]")
-            raise typer.Exit(1)
         ok = store.update_decision_status(item["id"], new_status)
         if not ok:
-            console.print("[red]Invalid status. Use: proposed | decided | reversed | superseded[/red]")
+            console.print(
+                "[red]Invalid status. Use: proposed | decided | reversed | superseded[/red]"
+            )
             raise typer.Exit(1)
         console.print(f"[green]Updated decision[/green] {item['id'][:8]} → {new_status}")
-
     else:
-        item = resolve(store.get_action, store.list_actions)
-        if not item:
-            console.print(f"[red]Action not found: {item_id}[/red]")
-            raise typer.Exit(1)
         ok = store.update_action_status(item["id"], status=new_status, owner=owner)
         if not ok:
-            console.print("[red]Invalid status. Use: open | in_progress | done | cancelled[/red]")
+            console.print(
+                "[red]Invalid status. Use: open | in_progress | done | cancelled[/red]"
+            )
             raise typer.Exit(1)
         extra = f" (owner → {owner})" if owner is not None else ""
         console.print(f"[green]Updated action[/green] {item['id'][:8]} → {new_status}{extra}")
@@ -202,18 +252,22 @@ def status_cmd(
 
 @app.command("export")
 def export_cmd(
-    format: str = typer.Option("md", "--format", "-f", help="md (Markdown)"),
-    output: Optional[Path] = typer.Option(None, "--output", "-o", help="Write to file instead of stdout"),
+    format: str = typer.Option("md", "--format", "-f", help="md | json"),
+    output: Optional[Path] = typer.Option(
+        None, "--output", "-o", help="Write to file instead of stdout"
+    ),
     db: Optional[Path] = typer.Option(None, "--db"),
 ):
-    """Export the decision log (currently Markdown)."""
+    """Export the decision log as Markdown or JSON."""
     store = _store(db)
 
-    if format != "md":
-        console.print("[red]Only --format md is supported right now[/red]")
+    if format == "md":
+        content = store.export_markdown()
+    elif format == "json":
+        content = store.export_json()
+    else:
+        console.print("[red]--format must be md or json[/red]")
         raise typer.Exit(1)
-
-    content = store.export_markdown()
 
     if output:
         output.write_text(content, encoding="utf-8")
