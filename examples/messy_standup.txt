@@ -1,0 +1,16 @@
+Daily standup – Aug 1
+
+Alex: Still blocked on the auth service. Someone needs to look at the rate limit errors.
+
+Priya: I finished the redesign mockups. We should just ship the new settings page as-is. Everyone okay with that?
+(nods around the table)
+Okay, decided — new settings page goes out with the mockups I shared. I'll hand off to eng today.
+
+Sarah: Phone verification removal is in review. Hoping to merge by Friday if QA is green.
+
+John: Analytics dashboard update slipped. I'll try to have the drop-off charts ready by end of next week.
+
+Alex again: Also we never decided whether to keep the beta badge on the homepage. Can we just remove it?
+Priya: Yes, remove the beta badge. It's been live long enough.
+
+No other blockers.
