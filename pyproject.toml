@@ -4,10 +4,11 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "decisionlog"
-version = "0.2.1"
+version = "0.2.2"
 description = "Turn meeting notes into a clean decision log with owners and deadlines"
 readme = "README.md"
 requires-python = ">=3.11"
+license = { text = "MIT" }
 dependencies = [
     "pydantic>=2.0",
     "typer>=0.12",
