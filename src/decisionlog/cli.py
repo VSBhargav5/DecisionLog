@@ -32,6 +32,11 @@ def extract_cmd(
         None, "--date", "-d", help="Meeting date YYYY-MM-DD (for relative deadlines)"
     ),
     model: str = typer.Option("gpt-4o-mini", "--model", help="LLM model name"),
+    base_url: Optional[str] = typer.Option(
+        None,
+        "--base-url",
+        help="OpenAI-compatible API base URL (e.g. https://api.groq.com/openai/v1)",
+    ),
     replace: bool = typer.Option(
         False, "--replace", help="Replace existing meeting with same title (re-run)"
     ),
@@ -67,12 +72,25 @@ def extract_cmd(
         raise typer.Exit(1)
 
     console.print(f"[bold]Extracting from[/bold] {file.name} ...")
-    result = extract(
-        text,
-        meeting_id=meeting_id,
-        reference_date=ref_date,
-        model=model,
-    )
+    try:
+        result = extract(
+            text,
+            meeting_id=meeting_id,
+            reference_date=ref_date,
+            model=model,
+            base_url=base_url,
+        )
+    except Exception as e:
+        msg = str(e).lower()
+        if "api_key" in msg or "authentication" in msg or "401" in msg:
+            console.print(
+                "[red]API key missing or invalid.[/red]\n"
+                "Set OPENAI_API_KEY (or the key for your provider) and retry.\n"
+                "For other providers use --base-url (OpenAI-compatible)."
+            )
+        else:
+            console.print(f"[red]Extraction failed:[/red] {e}")
+        raise typer.Exit(1) from e
 
     if not result.decisions and not result.action_items:
         console.print(
