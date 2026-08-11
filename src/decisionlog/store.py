@@ -69,10 +69,9 @@ class DecisionStore:
                 CREATE INDEX IF NOT EXISTS idx_actions_meeting ON action_items(meeting_id);
                 CREATE INDEX IF NOT EXISTS idx_actions_status ON action_items(status);
                 CREATE INDEX IF NOT EXISTS idx_actions_owner ON action_items(owner);
+                CREATE INDEX IF NOT EXISTS idx_actions_due ON action_items(due_date);
                 """
             )
-
-    # ── Meetings ──────────────────────────────────────────────
 
     def find_meeting_by_title(self, title: str) -> Optional[dict]:
         with self._connect() as conn:
@@ -89,8 +88,6 @@ class DecisionStore:
             ).fetchone()
             return dict(row) if row else None
 
-    # ── Save / Re-run ─────────────────────────────────────────
-
     def save_extraction(
         self,
         meeting_id: str,
@@ -100,13 +97,6 @@ class DecisionStore:
         meeting_date: Optional[date] = None,
         replace_existing: bool = False,
     ) -> str:
-        """
-        Persist an extraction result.
-
-        If replace_existing=True and a meeting with the same title already exists,
-        its previous decisions/actions are removed and replaced (true re-run).
-        Returns the meeting_id that was used.
-        """
         now = datetime.utcnow().isoformat()
         existing = self.find_meeting_by_title(title)
 
@@ -192,8 +182,6 @@ class DecisionStore:
 
         return meeting_id
 
-    # ── Read ──────────────────────────────────────────────────
-
     def list_decisions(
         self,
         status: Optional[str] = None,
@@ -222,6 +210,9 @@ class DecisionStore:
         status: Optional[str] = None,
         owner: Optional[str] = None,
         meeting_id: Optional[str] = None,
+        *,
+        overdue: bool = False,
+        as_of: Optional[date] = None,
     ) -> list[dict]:
         query = (
             "SELECT a.*, m.title AS meeting_title "
@@ -233,14 +224,23 @@ class DecisionStore:
             clauses.append("a.status = ?")
             params.append(status)
         if owner:
-            clauses.append("a.owner = ?")
+            clauses.append("LOWER(a.owner) = LOWER(?)")
             params.append(owner)
         if meeting_id:
             clauses.append("a.meeting_id = ?")
             params.append(meeting_id)
+        if overdue:
+            today = (as_of or date.today()).isoformat()
+            clauses.append("a.due_date IS NOT NULL")
+            clauses.append("a.due_date < ?")
+            params.append(today)
+            clauses.append("a.status NOT IN ('done', 'cancelled')")
         if clauses:
             query += " WHERE " + " AND ".join(clauses)
-        query += " ORDER BY a.created_at DESC"
+        if overdue:
+            query += " ORDER BY a.due_date ASC"
+        else:
+            query += " ORDER BY a.created_at DESC"
         with self._connect() as conn:
             return [dict(r) for r in conn.execute(query, params).fetchall()]
 
@@ -250,6 +250,48 @@ class DecisionStore:
                 "SELECT * FROM meetings ORDER BY created_at DESC"
             ).fetchall()
             return [dict(r) for r in rows]
+
+    def search(self, query: str, limit: int = 30) -> dict[str, list[dict]]:
+        """Case-insensitive substring search over decisions, actions, meetings."""
+        q = f"%{query.strip()}%"
+        with self._connect() as conn:
+            decisions = [
+                dict(r)
+                for r in conn.execute(
+                    """
+                    SELECT d.*, m.title AS meeting_title
+                    FROM decisions d JOIN meetings m ON d.meeting_id = m.id
+                    WHERE d.text LIKE ? OR IFNULL(d.evidence, '') LIKE ?
+                    ORDER BY d.created_at DESC LIMIT ?
+                    """,
+                    (q, q, limit),
+                ).fetchall()
+            ]
+            actions = [
+                dict(r)
+                for r in conn.execute(
+                    """
+                    SELECT a.*, m.title AS meeting_title
+                    FROM action_items a JOIN meetings m ON a.meeting_id = m.id
+                    WHERE a.text LIKE ? OR IFNULL(a.owner, '') LIKE ?
+                       OR IFNULL(a.evidence, '') LIKE ?
+                    ORDER BY a.created_at DESC LIMIT ?
+                    """,
+                    (q, q, q, limit),
+                ).fetchall()
+            ]
+            meetings = [
+                dict(r)
+                for r in conn.execute(
+                    """
+                    SELECT * FROM meetings
+                    WHERE title LIKE ? OR IFNULL(summary, '') LIKE ?
+                    ORDER BY created_at DESC LIMIT ?
+                    """,
+                    (q, q, limit),
+                ).fetchall()
+            ]
+        return {"decisions": decisions, "actions": actions, "meetings": meetings}
 
     def get_decision(self, item_id: str) -> Optional[dict]:
         with self._connect() as conn:
@@ -272,7 +314,6 @@ class DecisionStore:
             return dict(row) if row else None
 
     def resolve_id(self, short_or_full: str, kind: str) -> Optional[dict]:
-        """Resolve full UUID or 8-char prefix for action/decision."""
         if kind == "decision":
             item = self.get_decision(short_or_full)
             if item:
@@ -288,8 +329,6 @@ class DecisionStore:
                 if row["id"].startswith(short_or_full):
                     return row
         return None
-
-    # ── Status updates ────────────────────────────────────────
 
     def update_decision_status(self, item_id: str, status: str) -> bool:
         try:
@@ -338,8 +377,6 @@ class DecisionStore:
                 params,
             )
             return cur.rowcount > 0
-
-    # ── Export helpers ────────────────────────────────────────
 
     def export_markdown(self) -> str:
         meetings = self.list_meetings()
