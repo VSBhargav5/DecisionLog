@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "decisionlog"
-version = "0.2.2"
+version = "0.3.0"
 description = "Turn meeting notes into a clean decision log with owners and deadlines"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -17,8 +17,15 @@ dependencies = [
     "python-dateutil>=2.8",
 ]
 
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
 [project.scripts]
 decisionlog = "decisionlog.cli:app"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
