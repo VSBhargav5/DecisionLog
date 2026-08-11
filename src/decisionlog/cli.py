@@ -133,6 +133,9 @@ def list_cmd(
     meeting: Optional[str] = typer.Option(
         None, "--meeting", "-m", help="Filter by meeting title (exact match)"
     ),
+    overdue: bool = typer.Option(
+        False, "--overdue", help="Only open/in-progress actions past due_date"
+    ),
     db: Optional[Path] = typer.Option(None, "--db"),
 ):
     """List items from the decision log."""
@@ -159,8 +162,11 @@ def list_cmd(
             console.print("[dim]No decisions found.[/dim]")
 
     elif kind == "actions":
-        rows = store.list_actions(status=status, owner=owner, meeting_id=meeting_id)
-        table = Table(title="Action Items")
+        rows = store.list_actions(
+            status=status, owner=owner, meeting_id=meeting_id, overdue=overdue
+        )
+        title = "Overdue action items" if overdue else "Action Items"
+        table = Table(title=title)
         table.add_column("ID", style="dim", max_width=8)
         table.add_column("Owner")
         table.add_column("Text")
@@ -200,6 +206,44 @@ def list_cmd(
     else:
         console.print("[red]kind must be one of: actions, decisions, meetings[/red]")
         raise typer.Exit(1)
+
+
+@app.command("search")
+def search_cmd(
+    query: str = typer.Argument(..., help="Substring to search for"),
+    db: Optional[Path] = typer.Option(None, "--db"),
+):
+    """Search decisions, actions, and meetings by text."""
+    store = _store(db)
+    hits = store.search(query)
+    total = sum(len(v) for v in hits.values())
+    if total == 0:
+        console.print(f"[dim]No matches for '{query}'[/dim]")
+        raise typer.Exit(0)
+
+    if hits["meetings"]:
+        console.print("[bold]Meetings[/bold]")
+        for m in hits["meetings"]:
+            console.print(f"  • {m['title']}  [dim]{m['id'][:8]}[/dim]")
+        console.print()
+
+    if hits["decisions"]:
+        console.print("[bold]Decisions[/bold]")
+        for d in hits["decisions"]:
+            console.print(
+                f"  • [{d['status']}] {d['text']}  "
+                f"[dim]{d.get('meeting_title', '')} · {d['id'][:8]}[/dim]"
+            )
+        console.print()
+
+    if hits["actions"]:
+        console.print("[bold]Actions[/bold]")
+        for a in hits["actions"]:
+            owner = a.get("owner") or "—"
+            console.print(
+                f"  • [{a['status']}] [{owner}] {a['text']}  "
+                f"[dim]{a.get('meeting_title', '')} · {a['id'][:8]}[/dim]"
+            )
 
 
 @app.command("show")
