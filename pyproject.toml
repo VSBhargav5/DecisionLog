@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "decisionlog"
-version = "0.3.0"
+version = "0.4.0"
 description = "Turn meeting notes into a clean decision log with owners and deadlines"
 readme = "README.md"
 requires-python = ">=3.11"
