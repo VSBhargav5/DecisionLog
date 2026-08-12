@@ -24,6 +24,27 @@ def _store(db: Optional[Path] = None) -> DecisionStore:
     return DecisionStore(db) if db else DecisionStore()
 
 
+def _print_actions(rows: list[dict], title: str) -> None:
+    table = Table(title=title)
+    table.add_column("ID", style="dim", max_width=8)
+    table.add_column("Owner")
+    table.add_column("Text")
+    table.add_column("Due")
+    table.add_column("Status")
+    for r in rows:
+        due = r.get("due_date") or r.get("due_text") or "—"
+        table.add_row(
+            r["id"][:8],
+            r["owner"] or "—",
+            r["text"],
+            str(due),
+            r["status"],
+        )
+    console.print(table)
+    if not rows:
+        console.print("[dim]None.[/dim]")
+
+
 @app.command("extract")
 def extract_cmd(
     file: Path = typer.Argument(..., help="Path to meeting notes / transcript"),
@@ -136,6 +157,14 @@ def list_cmd(
     overdue: bool = typer.Option(
         False, "--overdue", help="Only open/in-progress actions past due_date"
     ),
+    due_soon: Optional[int] = typer.Option(
+        None,
+        "--due-soon",
+        help="Actions due within N days (inclusive of today)",
+    ),
+    unassigned: bool = typer.Option(
+        False, "--unassigned", help="Only open actions with no owner"
+    ),
     db: Optional[Path] = typer.Option(None, "--db"),
 ):
     """List items from the decision log."""
@@ -163,27 +192,22 @@ def list_cmd(
 
     elif kind == "actions":
         rows = store.list_actions(
-            status=status, owner=owner, meeting_id=meeting_id, overdue=overdue
+            status=status,
+            owner=owner,
+            meeting_id=meeting_id,
+            overdue=overdue,
+            due_within_days=due_soon,
+            unassigned=unassigned,
         )
-        title = "Overdue action items" if overdue else "Action Items"
-        table = Table(title=title)
-        table.add_column("ID", style="dim", max_width=8)
-        table.add_column("Owner")
-        table.add_column("Text")
-        table.add_column("Due")
-        table.add_column("Status")
-        for r in rows:
-            due = r.get("due_date") or r.get("due_text") or "—"
-            table.add_row(
-                r["id"][:8],
-                r["owner"] or "—",
-                r["text"],
-                str(due),
-                r["status"],
-            )
-        console.print(table)
-        if not rows:
-            console.print("[dim]No action items found.[/dim]")
+        if overdue:
+            title = "Overdue action items"
+        elif due_soon is not None:
+            title = f"Due within {due_soon} day(s)"
+        elif unassigned:
+            title = "Unassigned action items"
+        else:
+            title = "Action Items"
+        _print_actions(rows, title)
 
     elif kind == "meetings":
         rows = store.list_meetings()
@@ -206,6 +230,35 @@ def list_cmd(
     else:
         console.print("[red]kind must be one of: actions, decisions, meetings[/red]")
         raise typer.Exit(1)
+
+
+@app.command("digest")
+def digest_cmd(
+    days: int = typer.Option(7, "--days", "-n", help="Due-soon window in days"),
+    db: Optional[Path] = typer.Option(None, "--db"),
+):
+    """Daily-style summary: overdue, due soon, unassigned, load by owner."""
+    store = _store(db)
+    d = store.digest(due_within_days=days)
+
+    console.print(Panel.fit(
+        f"[bold]DecisionLog digest[/bold]  ·  {d['as_of']}\n"
+        f"Meetings {d['meetings']}  ·  Decided {d['decisions_decided']}  ·  "
+        f"Open {d['actions_open']}  ·  In progress {d['actions_in_progress']}",
+        border_style="cyan",
+    ))
+
+    if d["by_owner"]:
+        console.print("\n[bold]Open load by owner[/bold]")
+        for name, count in d["by_owner"].items():
+            console.print(f"  {name}: {count}")
+
+    console.print()
+    _print_actions(d["overdue"], "Overdue")
+    console.print()
+    _print_actions(d["due_soon"], f"Due within {days} day(s)")
+    console.print()
+    _print_actions(d["unassigned"], "Unassigned")
 
 
 @app.command("search")
@@ -310,6 +363,37 @@ def status_cmd(
             raise typer.Exit(1)
         extra = f" (owner → {owner})" if owner is not None else ""
         console.print(f"[green]Updated action[/green] {item['id'][:8]} → {new_status}{extra}")
+
+
+@app.command("delete-meeting")
+def delete_meeting_cmd(
+    meeting: str = typer.Argument(..., help="Meeting title or id (prefix ok)"),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation"),
+    db: Optional[Path] = typer.Option(None, "--db"),
+):
+    """Delete a meeting and all of its decisions/actions."""
+    store = _store(db)
+    m = store.resolve_meeting(meeting)
+    if not m:
+        console.print(f"[red]Meeting not found: {meeting}[/red]")
+        raise typer.Exit(1)
+
+    if not yes:
+        console.print(
+            f"Delete meeting [bold]{m['title']}[/bold] ({m['id'][:8]}…) "
+            "and all linked decisions/actions?"
+        )
+        confirm = typer.confirm("Continue?")
+        if not confirm:
+            console.print("[dim]Cancelled.[/dim]")
+            raise typer.Exit(0)
+
+    ok = store.delete_meeting(m["id"])
+    if ok:
+        console.print(f"[green]Deleted[/green] {m['title']}")
+    else:
+        console.print("[red]Delete failed[/red]")
+        raise typer.Exit(1)
 
 
 @app.command("export")
