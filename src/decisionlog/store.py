@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
@@ -87,6 +87,25 @@ class DecisionStore:
                 "SELECT * FROM meetings WHERE id = ?", (meeting_id,)
             ).fetchone()
             return dict(row) if row else None
+
+    def resolve_meeting(self, title_or_id: str) -> Optional[dict]:
+        m = self.find_meeting_by_title(title_or_id)
+        if m:
+            return m
+        m = self.get_meeting(title_or_id)
+        if m:
+            return m
+        for row in self.list_meetings():
+            if row["id"].startswith(title_or_id):
+                return row
+        return None
+
+    def delete_meeting(self, meeting_id: str) -> bool:
+        with self._connect() as conn:
+            conn.execute("DELETE FROM decisions WHERE meeting_id = ?", (meeting_id,))
+            conn.execute("DELETE FROM action_items WHERE meeting_id = ?", (meeting_id,))
+            cur = conn.execute("DELETE FROM meetings WHERE id = ?", (meeting_id,))
+            return cur.rowcount > 0
 
     def save_extraction(
         self,
@@ -212,6 +231,8 @@ class DecisionStore:
         meeting_id: Optional[str] = None,
         *,
         overdue: bool = False,
+        due_within_days: Optional[int] = None,
+        unassigned: bool = False,
         as_of: Optional[date] = None,
     ) -> list[dict]:
         query = (
@@ -220,6 +241,8 @@ class DecisionStore:
         )
         clauses: list[str] = []
         params: list = []
+        today = as_of or date.today()
+
         if status:
             clauses.append("a.status = ?")
             params.append(status)
@@ -229,15 +252,25 @@ class DecisionStore:
         if meeting_id:
             clauses.append("a.meeting_id = ?")
             params.append(meeting_id)
+        if unassigned:
+            clauses.append("(a.owner IS NULL OR TRIM(a.owner) = '')")
+            clauses.append("a.status NOT IN ('done', 'cancelled')")
         if overdue:
-            today = (as_of or date.today()).isoformat()
             clauses.append("a.due_date IS NOT NULL")
             clauses.append("a.due_date < ?")
-            params.append(today)
+            params.append(today.isoformat())
             clauses.append("a.status NOT IN ('done', 'cancelled')")
+        if due_within_days is not None:
+            end = today + timedelta(days=due_within_days)
+            clauses.append("a.due_date IS NOT NULL")
+            clauses.append("a.due_date >= ?")
+            clauses.append("a.due_date <= ?")
+            params.extend([today.isoformat(), end.isoformat()])
+            clauses.append("a.status NOT IN ('done', 'cancelled')")
+
         if clauses:
             query += " WHERE " + " AND ".join(clauses)
-        if overdue:
+        if overdue or due_within_days is not None:
             query += " ORDER BY a.due_date ASC"
         else:
             query += " ORDER BY a.created_at DESC"
@@ -251,8 +284,37 @@ class DecisionStore:
             ).fetchall()
             return [dict(r) for r in rows]
 
+    def digest(self, *,
+               due_within_days: int = 7,
+               as_of: Optional[date] = None) -> dict:
+        """Summary counts + slices for a daily standup digest."""
+        today = as_of or date.today()
+        open_actions = self.list_actions(status="open")
+        in_progress = self.list_actions(status="in_progress")
+        overdue = self.list_actions(overdue=True, as_of=today)
+        due_soon = self.list_actions(due_within_days=due_within_days, as_of=today)
+        unassigned = self.list_actions(unassigned=True)
+        decisions = self.list_decisions(status="decided")
+        meetings = self.list_meetings()
+
+        by_owner: dict[str, int] = {}
+        for a in open_actions + in_progress:
+            key = (a.get("owner") or "(unassigned)").strip() or "(unassigned)"
+            by_owner[key] = by_owner.get(key, 0) + 1
+
+        return {
+            "as_of": today.isoformat(),
+            "meetings": len(meetings),
+            "decisions_decided": len(decisions),
+            "actions_open": len(open_actions),
+            "actions_in_progress": len(in_progress),
+            "overdue": overdue,
+            "due_soon": due_soon,
+            "unassigned": unassigned,
+            "by_owner": dict(sorted(by_owner.items(), key=lambda kv: (-kv[1], kv[0]))),
+        }
+
     def search(self, query: str, limit: int = 30) -> dict[str, list[dict]]:
-        """Case-insensitive substring search over decisions, actions, meetings."""
         q = f"%{query.strip()}%"
         with self._connect() as conn:
             decisions = [
