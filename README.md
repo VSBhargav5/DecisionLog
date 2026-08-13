@@ -5,7 +5,7 @@
 Most meeting tools capture *what was said*.  
 DecisionLog captures **what was decided**, **who owns it**, and **when it is due** — then keeps it searchable and updatable.
 
-**Current version: 0.4.0**
+**Current version: 0.5.0**
 
 ---
 
@@ -28,8 +28,8 @@ DecisionLog focuses on the overlooked middle layer: reliable extraction of **dec
 2. Extracts **decisions** and **action items** (owners, deadlines, evidence, confidence)
 3. **Normalizes relative deadlines** (`by next Friday`, `EOD`, `end of month`, …)
 4. Stores everything in local SQLite
-5. **digest** (overdue / due-soon / unassigned / load by owner)
-6. **search**, **status**, **delete-meeting**, **Markdown + JSON export**
+5. **digest** · **assign** · **search** · overdue / due-soon / unassigned
+6. Export **Markdown · JSON · CSV · ICS** (calendar)
 7. Works with any **OpenAI-compatible** provider via `--base-url`
 
 ---
@@ -40,8 +40,7 @@ DecisionLog focuses on the overlooked middle layer: reliable extraction of **dec
 git clone https://github.com/VSBhargav5/DecisionLog.git
 cd DecisionLog
 pip install -e ".[dev]"
-
-pytest -q   # offline, no API key
+pytest -q
 
 export OPENAI_API_KEY="sk-..."
 python -m decisionlog extract examples/sample_meeting.txt \
@@ -55,26 +54,16 @@ python -m decisionlog digest --days 7
 python -m decisionlog list actions --overdue
 python -m decisionlog list actions --due-soon 3
 python -m decisionlog list actions --unassigned
-python -m decisionlog search refund
-python -m decisionlog status <id> done
-python -m decisionlog delete-meeting "Sprint Planning 31 Jul" -y
-python -m decisionlog export -o log.md
-```
-
----
-
-## Architecture
-
-```
-Transcript → LLM extractor → deadline normalizer → SQLite store
-                ↓
-  extract · list · digest · search · show · status · delete-meeting · export
+python -m decisionlog assign <id> Sarah
+python -m decisionlog export -f ics -o actions.ics --open-only
+python -m decisionlog export -f csv -o actions.csv
 ```
 
 ---
 
 ## Status
 
+**v0.5.0** — assign, ICS calendar export, CSV export  
 **v0.4.0** — digest, due-soon, unassigned, delete-meeting  
 **v0.3.0** — overdue, search, offline tests, CI  
 **v0.2.x** — extract, replace, status, export, OpenAI-compatible base URL
