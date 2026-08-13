@@ -10,6 +10,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
+from .exporters import actions_to_csv, actions_to_ics, decisions_to_csv
 from .extractor import extract
 from .store import DecisionStore
 
@@ -261,6 +262,33 @@ def digest_cmd(
     _print_actions(d["unassigned"], "Unassigned")
 
 
+@app.command("assign")
+def assign_cmd(
+    item_id: str = typer.Argument(..., help="Action id (prefix ok)"),
+    owner: str = typer.Argument(..., help="New owner name (use '' to clear)"),
+    db: Optional[Path] = typer.Option(None, "--db"),
+):
+    """Set or clear the owner of an action item."""
+    store = _store(db)
+    item = store.resolve_id(item_id, "action")
+    if not item:
+        console.print(f"[red]Action not found: {item_id}[/red]")
+        raise typer.Exit(1)
+
+    new_owner = owner.strip() or None
+    ok = store.update_action_status(item["id"], owner=new_owner if new_owner is not None else "")
+    # update_action_status treats empty string as clear when owner is not None
+    # Fix: pass empty string to clear - looking at store, owner if owner else None clears
+    if not ok:
+        # owner-only update should work even without status
+        ok = store.update_action_status(item["id"], owner=new_owner or "")
+    if not ok:
+        console.print("[red]Failed to update owner[/red]")
+        raise typer.Exit(1)
+    label = new_owner or "(unassigned)"
+    console.print(f"[green]Assigned[/green] {item['id'][:8]} → {label}")
+
+
 @app.command("search")
 def search_cmd(
     query: str = typer.Argument(..., help="Substring to search for"),
@@ -398,21 +426,38 @@ def delete_meeting_cmd(
 
 @app.command("export")
 def export_cmd(
-    format: str = typer.Option("md", "--format", "-f", help="md | json"),
+    format: str = typer.Option(
+        "md", "--format", "-f", help="md | json | csv | ics"
+    ),
     output: Optional[Path] = typer.Option(
         None, "--output", "-o", help="Write to file instead of stdout"
     ),
+    open_only: bool = typer.Option(
+        False,
+        "--open-only",
+        help="For csv/ics: only open + in_progress actions",
+    ),
     db: Optional[Path] = typer.Option(None, "--db"),
 ):
-    """Export the decision log as Markdown or JSON."""
+    """Export the decision log as Markdown, JSON, CSV, or ICS calendar."""
     store = _store(db)
 
     if format == "md":
         content = store.export_markdown()
     elif format == "json":
         content = store.export_json()
+    elif format == "csv":
+        actions = store.list_actions()
+        if open_only:
+            actions = [a for a in actions if a["status"] in ("open", "in_progress")]
+        content = actions_to_csv(actions)
+    elif format == "ics":
+        actions = store.list_actions()
+        if open_only:
+            actions = [a for a in actions if a["status"] in ("open", "in_progress")]
+        content = actions_to_ics(actions)
     else:
-        console.print("[red]--format must be md or json[/red]")
+        console.print("[red]--format must be md, json, csv, or ics[/red]")
         raise typer.Exit(1)
 
     if output:
