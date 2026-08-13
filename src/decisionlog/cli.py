@@ -10,7 +10,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
-from .exporters import actions_to_csv, actions_to_ics, decisions_to_csv
+from .exporters import actions_to_csv, actions_to_ics
 from .extractor import extract
 from .store import DecisionStore
 
@@ -265,7 +265,7 @@ def digest_cmd(
 @app.command("assign")
 def assign_cmd(
     item_id: str = typer.Argument(..., help="Action id (prefix ok)"),
-    owner: str = typer.Argument(..., help="New owner name (use '' to clear)"),
+    owner: str = typer.Argument(..., help="New owner name (use - to clear)"),
     db: Optional[Path] = typer.Option(None, "--db"),
 ):
     """Set or clear the owner of an action item."""
@@ -275,13 +275,9 @@ def assign_cmd(
         console.print(f"[red]Action not found: {item_id}[/red]")
         raise typer.Exit(1)
 
-    new_owner = owner.strip() or None
+    new_owner = None if owner.strip() in {"-", ""} else owner.strip()
+    # store maps empty string → NULL when owner is provided
     ok = store.update_action_status(item["id"], owner=new_owner if new_owner is not None else "")
-    # update_action_status treats empty string as clear when owner is not None
-    # Fix: pass empty string to clear - looking at store, owner if owner else None clears
-    if not ok:
-        # owner-only update should work even without status
-        ok = store.update_action_status(item["id"], owner=new_owner or "")
     if not ok:
         console.print("[red]Failed to update owner[/red]")
         raise typer.Exit(1)
