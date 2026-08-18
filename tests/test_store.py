@@ -71,9 +71,40 @@ def test_due_soon_unassigned_digest_delete(tmp_path: Path):
     assert d["actions_open"] >= 2
     assert len(d["overdue"]) == 1
     assert "Sarah" in d["by_owner"] or "Alex" in d["by_owner"]
+    assert "by_priority" in d
 
     m = store.resolve_meeting("Sprint Planning")
     assert m
     assert store.delete_meeting(m["id"])
     assert store.list_meetings() == []
     assert store.list_actions() == []
+
+
+def test_priority_tags_notes_done_due_stats(tmp_path: Path):
+    store = _store(tmp_path)
+    _seed(store)
+    actions = store.list_actions()
+    aid = next(a["id"] for a in actions if a["text"] == "Update docs")
+
+    assert store.update_action(aid, priority="P0")
+    assert store.update_action(aid, tags=["docs", "release"])
+    assert store.update_action(aid, append_note="Draft started")
+    assert store.update_action(aid, due_date=date(2026, 8, 15))
+
+    item = store.get_action(aid)
+    assert item["priority"] == "P0"
+    assert "docs" in item["tags"] and "release" in item["tags"]
+    assert "Draft started" in (item.get("notes") or "")
+    assert item["due_date"] == "2026-08-15"
+
+    filtered = store.list_actions(priority="P0")
+    assert any(a["id"] == aid for a in filtered)
+    tagged = store.list_actions(tag="docs")
+    assert any(a["id"] == aid for a in tagged)
+
+    assert store.update_action(aid, status="done")
+    assert store.get_action(aid)["status"] == "done"
+
+    s = store.stats(as_of=date(2026, 8, 10))
+    assert s["actions"] >= 3
+    assert s["by_status"].get("done", 0) >= 1
