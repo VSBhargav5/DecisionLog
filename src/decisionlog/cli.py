@@ -20,26 +20,39 @@ app = typer.Typer(
 )
 console = Console()
 
+PRIORITY_STYLE = {
+    "P0": "bold red",
+    "P1": "red",
+    "P2": "yellow",
+    "P3": "dim",
+}
+
 
 def _store(db: Optional[Path] = None) -> DecisionStore:
     return DecisionStore(db) if db else DecisionStore()
 
 
 def _print_actions(rows: list[dict], title: str) -> None:
-    table = Table(title=title)
+    table = Table(title=title, show_lines=False)
     table.add_column("ID", style="dim", max_width=8)
+    table.add_column("P", width=3)
     table.add_column("Owner")
     table.add_column("Text")
     table.add_column("Due")
     table.add_column("Status")
+    table.add_column("Tags", style="cyan")
     for r in rows:
         due = r.get("due_date") or r.get("due_text") or "—"
+        pri = (r.get("priority") or "P2").upper()
+        tags = ", ".join(r.get("tags") or []) or "—"
         table.add_row(
             r["id"][:8],
-            r["owner"] or "—",
+            f"[{PRIORITY_STYLE.get(pri, 'white')}]{pri}[/]",
+            r.get("owner") or "—",
             r["text"],
             str(due),
             r["status"],
+            tags,
         )
     console.print(table)
     if not rows:
@@ -166,6 +179,10 @@ def list_cmd(
     unassigned: bool = typer.Option(
         False, "--unassigned", help="Only open actions with no owner"
     ),
+    priority: Optional[str] = typer.Option(
+        None, "--priority", "-p", help="Filter by priority P0|P1|P2|P3"
+    ),
+    tag: Optional[str] = typer.Option(None, "--tag", "-t", help="Filter by tag"),
     db: Optional[Path] = typer.Option(None, "--db"),
 ):
     """List items from the decision log."""
@@ -199,6 +216,8 @@ def list_cmd(
             overdue=overdue,
             due_within_days=due_soon,
             unassigned=unassigned,
+            priority=priority,
+            tag=tag,
         )
         if overdue:
             title = "Overdue action items"
@@ -206,6 +225,10 @@ def list_cmd(
             title = f"Due within {due_soon} day(s)"
         elif unassigned:
             title = "Unassigned action items"
+        elif priority:
+            title = f"Priority {priority.upper()}"
+        elif tag:
+            title = f"Tag: {tag}"
         else:
             title = "Action Items"
         _print_actions(rows, title)
@@ -242,12 +265,16 @@ def digest_cmd(
     store = _store(db)
     d = store.digest(due_within_days=days)
 
-    console.print(Panel.fit(
-        f"[bold]DecisionLog digest[/bold]  ·  {d['as_of']}\n"
-        f"Meetings {d['meetings']}  ·  Decided {d['decisions_decided']}  ·  "
-        f"Open {d['actions_open']}  ·  In progress {d['actions_in_progress']}",
-        border_style="cyan",
-    ))
+    pri_bits = " · ".join(f"{k} {v}" for k, v in d.get("by_priority", {}).items()) or "—"
+    console.print(
+        Panel.fit(
+            f"[bold]DecisionLog digest[/bold]  ·  {d['as_of']}\n"
+            f"Meetings {d['meetings']}  ·  Decided {d['decisions_decided']}  ·  "
+            f"Open {d['actions_open']}  ·  In progress {d['actions_in_progress']}\n"
+            f"Priority mix: {pri_bits}",
+            border_style="cyan",
+        )
+    )
 
     if d["by_owner"]:
         console.print("\n[bold]Open load by owner[/bold]")
@@ -260,6 +287,149 @@ def digest_cmd(
     _print_actions(d["due_soon"], f"Due within {days} day(s)")
     console.print()
     _print_actions(d["unassigned"], "Unassigned")
+
+
+@app.command("stats")
+def stats_cmd(
+    db: Optional[Path] = typer.Option(None, "--db"),
+):
+    """High-level counts by status and priority."""
+    store = _store(db)
+    s = store.stats()
+    console.print(
+        Panel.fit(
+            f"[bold]DecisionLog stats[/bold]  ·  {s['as_of']}\n"
+            f"Meetings {s['meetings']}  ·  Decisions {s['decisions']}  ·  Actions {s['actions']}\n"
+            f"Overdue {s['overdue_count']}  ·  Unassigned {s['unassigned_count']}",
+            border_style="magenta",
+        )
+    )
+    if s["by_status"]:
+        console.print("[bold]By status[/bold]")
+        for k, v in sorted(s["by_status"].items()):
+            console.print(f"  {k}: {v}")
+    if s["by_priority"]:
+        console.print("[bold]By priority[/bold]")
+        for k, v in sorted(s["by_priority"].items()):
+            console.print(f"  {k}: {v}")
+
+
+@app.command("done")
+def done_cmd(
+    item_id: str = typer.Argument(..., help="Action id (prefix ok)"),
+    db: Optional[Path] = typer.Option(None, "--db"),
+):
+    """Mark an action as done."""
+    store = _store(db)
+    item = store.resolve_id(item_id, "action")
+    if not item:
+        console.print(f"[red]Action not found: {item_id}[/red]")
+        raise typer.Exit(1)
+    if not store.update_action(item["id"], status="done"):
+        console.print("[red]Failed to update[/red]")
+        raise typer.Exit(1)
+    console.print(f"[green]Done[/green] {item['id'][:8]} — {item['text']}")
+
+
+@app.command("reopen")
+def reopen_cmd(
+    item_id: str = typer.Argument(..., help="Action id (prefix ok)"),
+    db: Optional[Path] = typer.Option(None, "--db"),
+):
+    """Reopen a done/cancelled action."""
+    store = _store(db)
+    item = store.resolve_id(item_id, "action")
+    if not item:
+        console.print(f"[red]Action not found: {item_id}[/red]")
+        raise typer.Exit(1)
+    if not store.update_action(item["id"], status="open"):
+        console.print("[red]Failed to update[/red]")
+        raise typer.Exit(1)
+    console.print(f"[green]Reopened[/green] {item['id'][:8]}")
+
+
+@app.command("due")
+def due_cmd(
+    item_id: str = typer.Argument(..., help="Action id (prefix ok)"),
+    due_date: str = typer.Argument(..., help="YYYY-MM-DD or '-' to clear"),
+    db: Optional[Path] = typer.Option(None, "--db"),
+):
+    """Set or clear an action due date."""
+    store = _store(db)
+    item = store.resolve_id(item_id, "action")
+    if not item:
+        console.print(f"[red]Action not found: {item_id}[/red]")
+        raise typer.Exit(1)
+    if due_date.strip() in {"-", ""}:
+        ok = store.update_action(item["id"], clear_due=True)
+        label = "(cleared)"
+    else:
+        try:
+            d = date.fromisoformat(due_date.strip())
+        except ValueError:
+            console.print("[red]Due date must be YYYY-MM-DD or -[red]")
+            raise typer.Exit(1)
+        ok = store.update_action(item["id"], due_date=d)
+        label = d.isoformat()
+    if not ok:
+        console.print("[red]Failed to update due date[/red]")
+        raise typer.Exit(1)
+    console.print(f"[green]Due[/green] {item['id'][:8]} → {label}")
+
+
+@app.command("priority")
+def priority_cmd(
+    item_id: str = typer.Argument(..., help="Action id (prefix ok)"),
+    level: str = typer.Argument(..., help="P0 | P1 | P2 | P3"),
+    db: Optional[Path] = typer.Option(None, "--db"),
+):
+    """Set action priority."""
+    store = _store(db)
+    item = store.resolve_id(item_id, "action")
+    if not item:
+        console.print(f"[red]Action not found: {item_id}[/red]")
+        raise typer.Exit(1)
+    if not store.update_action(item["id"], priority=level):
+        console.print("[red]Invalid priority. Use P0, P1, P2, or P3[/red]")
+        raise typer.Exit(1)
+    console.print(f"[green]Priority[/green] {item['id'][:8]} → {level.upper()}")
+
+
+@app.command("tag")
+def tag_cmd(
+    item_id: str = typer.Argument(..., help="Action id (prefix ok)"),
+    tags: str = typer.Argument(..., help="Comma-separated tags (replaces existing)"),
+    db: Optional[Path] = typer.Option(None, "--db"),
+):
+    """Replace tags on an action (comma-separated)."""
+    store = _store(db)
+    item = store.resolve_id(item_id, "action")
+    if not item:
+        console.print(f"[red]Action not found: {item_id}[/red]")
+        raise typer.Exit(1)
+    tag_list = [t.strip() for t in tags.split(",") if t.strip()]
+    if not store.update_action(item["id"], tags=tag_list):
+        console.print("[red]Failed to update tags[/red]")
+        raise typer.Exit(1)
+    console.print(f"[green]Tags[/green] {item['id'][:8]} → {', '.join(tag_list) or '(none)'}")
+
+
+@app.command("note")
+def note_cmd(
+    item_id: str = typer.Argument(..., help="Action id (prefix ok)"),
+    text: str = typer.Argument(..., help="Note to append"),
+    db: Optional[Path] = typer.Option(None, "--db"),
+):
+    """Append a timestamped note to an action."""
+    store = _store(db)
+    item = store.resolve_id(item_id, "action")
+    if not item:
+        console.print(f"[red]Action not found: {item_id}[/red]")
+        raise typer.Exit(1)
+    if not store.update_action(item["id"], append_note=text):
+        console.print("[red]Failed to append note[/red]")
+        raise typer.Exit(1)
+    console.print(f"[green]Noted[/green] {item['id'][:8]}")
 
 
 @app.command("assign")
@@ -276,8 +446,7 @@ def assign_cmd(
         raise typer.Exit(1)
 
     new_owner = None if owner.strip() in {"-", ""} else owner.strip()
-    # store maps empty string → NULL when owner is provided
-    ok = store.update_action_status(item["id"], owner=new_owner if new_owner is not None else "")
+    ok = store.update_action(item["id"], owner=new_owner if new_owner is not None else "")
     if not ok:
         console.print("[red]Failed to update owner[/red]")
         raise typer.Exit(1)
@@ -349,6 +518,11 @@ def show_cmd(
         body_lines.insert(2, f"Owner      : {item.get('owner') or '(unassigned)'}")
         due = item.get("due_date") or item.get("due_text") or "—"
         body_lines.insert(3, f"Due        : {due}")
+        body_lines.insert(4, f"Priority   : {item.get('priority') or 'P2'}")
+        tags = ", ".join(item.get("tags") or []) or "—"
+        body_lines.insert(5, f"Tags       : {tags}")
+        if item.get("notes"):
+            body_lines.extend(["", f"Notes      :\n{item['notes']}"])
     if item.get("evidence"):
         body_lines.extend(["", f"Evidence   : {item['evidence']}"])
 
@@ -379,7 +553,7 @@ def status_cmd(
             raise typer.Exit(1)
         console.print(f"[green]Updated decision[/green] {item['id'][:8]} → {new_status}")
     else:
-        ok = store.update_action_status(item["id"], status=new_status, owner=owner)
+        ok = store.update_action(item["id"], status=new_status, owner=owner)
         if not ok:
             console.print(
                 "[red]Invalid status. Use: open | in_progress | done | cancelled[/red]"
