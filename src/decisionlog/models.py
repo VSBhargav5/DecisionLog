@@ -22,6 +22,13 @@ class ActionStatus(str, Enum):
     CANCELLED = "cancelled"
 
 
+class ActionPriority(str, Enum):
+    P0 = "P0"  # drop everything
+    P1 = "P1"  # this week
+    P2 = "P2"  # normal
+    P3 = "P3"  # backlog
+
+
 class Decision(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid4()))
     meeting_id: str
@@ -41,6 +48,9 @@ class ActionItem(BaseModel):
     due_date: Optional[date] = None
     due_text: Optional[str] = Field(None, description="Original deadline phrase")
     status: ActionStatus = ActionStatus.OPEN
+    priority: ActionPriority = ActionPriority.P2
+    tags: list[str] = Field(default_factory=list)
+    notes: Optional[str] = None
     evidence: Optional[str] = None
     confidence: float = Field(0.8, ge=0.0, le=1.0)
     linked_decision_id: Optional[str] = None
