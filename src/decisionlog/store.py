@@ -6,10 +6,23 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
-from .models import ActionStatus, DecisionStatus, ExtractionResult
+from .models import ActionPriority, ActionStatus, DecisionStatus, ExtractionResult
 
 
 DEFAULT_DB = Path.home() / ".decisionlog" / "decisions.db"
+
+
+def _tags_to_str(tags: list[str] | None) -> str:
+    if not tags:
+        return ""
+    cleaned = sorted({t.strip().lower() for t in tags if t and t.strip()})
+    return ",".join(cleaned)
+
+
+def _tags_from_str(raw: str | None) -> list[str]:
+    if not raw:
+        return []
+    return [t for t in (x.strip() for x in raw.split(",")) if t]
 
 
 class DecisionStore:
@@ -56,6 +69,9 @@ class DecisionStore:
                     due_date TEXT,
                     due_text TEXT,
                     status TEXT NOT NULL,
+                    priority TEXT DEFAULT 'P2',
+                    tags TEXT DEFAULT '',
+                    notes TEXT,
                     evidence TEXT,
                     confidence REAL,
                     linked_decision_id TEXT,
@@ -70,8 +86,28 @@ class DecisionStore:
                 CREATE INDEX IF NOT EXISTS idx_actions_status ON action_items(status);
                 CREATE INDEX IF NOT EXISTS idx_actions_owner ON action_items(owner);
                 CREATE INDEX IF NOT EXISTS idx_actions_due ON action_items(due_date);
+                CREATE INDEX IF NOT EXISTS idx_actions_priority ON action_items(priority);
                 """
             )
+            self._migrate(conn)
+
+    def _migrate(self, conn: sqlite3.Connection) -> None:
+        """Add columns introduced after v0.5 without breaking existing DBs."""
+        cols = {
+            r[1] for r in conn.execute("PRAGMA table_info(action_items)").fetchall()
+        }
+        if "priority" not in cols:
+            conn.execute("ALTER TABLE action_items ADD COLUMN priority TEXT DEFAULT 'P2'")
+        if "tags" not in cols:
+            conn.execute("ALTER TABLE action_items ADD COLUMN tags TEXT DEFAULT ''")
+        if "notes" not in cols:
+            conn.execute("ALTER TABLE action_items ADD COLUMN notes TEXT")
+
+    def _row_action(self, row: sqlite3.Row) -> dict:
+        d = dict(row)
+        d["tags"] = _tags_from_str(d.get("tags"))
+        d.setdefault("priority", "P2")
+        return d
 
     def find_meeting_by_title(self, title: str) -> Optional[dict]:
         with self._connect() as conn:
@@ -176,12 +212,14 @@ class DecisionStore:
                 )
 
             for a in result.action_items:
+                priority = a.priority.value if hasattr(a.priority, "value") else (a.priority or "P2")
                 conn.execute(
                     """
                     INSERT OR REPLACE INTO action_items
                     (id, meeting_id, text, owner, due_date, due_text, status,
-                     evidence, confidence, linked_decision_id, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     priority, tags, notes, evidence, confidence, linked_decision_id,
+                     created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         a.id,
@@ -191,6 +229,9 @@ class DecisionStore:
                         a.due_date.isoformat() if a.due_date else None,
                         a.due_text,
                         a.status.value,
+                        priority,
+                        _tags_to_str(a.tags),
+                        a.notes,
                         a.evidence,
                         a.confidence,
                         a.linked_decision_id,
@@ -233,6 +274,8 @@ class DecisionStore:
         overdue: bool = False,
         due_within_days: Optional[int] = None,
         unassigned: bool = False,
+        priority: Optional[str] = None,
+        tag: Optional[str] = None,
         as_of: Optional[date] = None,
     ) -> list[dict]:
         query = (
@@ -252,6 +295,14 @@ class DecisionStore:
         if meeting_id:
             clauses.append("a.meeting_id = ?")
             params.append(meeting_id)
+        if priority:
+            clauses.append("UPPER(IFNULL(a.priority, 'P2')) = UPPER(?)")
+            params.append(priority)
+        if tag:
+            clauses.append(
+                "(',' || LOWER(IFNULL(a.tags, '')) || ',') LIKE ?"
+            )
+            params.append(f"%,{tag.strip().lower()},%")
         if unassigned:
             clauses.append("(a.owner IS NULL OR TRIM(a.owner) = '')")
             clauses.append("a.status NOT IN ('done', 'cancelled')")
@@ -271,11 +322,11 @@ class DecisionStore:
         if clauses:
             query += " WHERE " + " AND ".join(clauses)
         if overdue or due_within_days is not None:
-            query += " ORDER BY a.due_date ASC"
+            query += " ORDER BY a.due_date ASC, IFNULL(a.priority, 'P2') ASC"
         else:
-            query += " ORDER BY a.created_at DESC"
+            query += " ORDER BY IFNULL(a.priority, 'P2') ASC, a.created_at DESC"
         with self._connect() as conn:
-            return [dict(r) for r in conn.execute(query, params).fetchall()]
+            return [self._row_action(r) for r in conn.execute(query, params).fetchall()]
 
     def list_meetings(self) -> list[dict]:
         with self._connect() as conn:
@@ -284,10 +335,12 @@ class DecisionStore:
             ).fetchall()
             return [dict(r) for r in rows]
 
-    def digest(self, *,
-               due_within_days: int = 7,
-               as_of: Optional[date] = None) -> dict:
-        """Summary counts + slices for a daily standup digest."""
+    def digest(
+        self,
+        *,
+        due_within_days: int = 7,
+        as_of: Optional[date] = None,
+    ) -> dict:
         today = as_of or date.today()
         open_actions = self.list_actions(status="open")
         in_progress = self.list_actions(status="in_progress")
@@ -298,9 +351,12 @@ class DecisionStore:
         meetings = self.list_meetings()
 
         by_owner: dict[str, int] = {}
+        by_priority: dict[str, int] = {}
         for a in open_actions + in_progress:
             key = (a.get("owner") or "(unassigned)").strip() or "(unassigned)"
             by_owner[key] = by_owner.get(key, 0) + 1
+            p = (a.get("priority") or "P2").upper()
+            by_priority[p] = by_priority.get(p, 0) + 1
 
         return {
             "as_of": today.isoformat(),
@@ -312,6 +368,28 @@ class DecisionStore:
             "due_soon": due_soon,
             "unassigned": unassigned,
             "by_owner": dict(sorted(by_owner.items(), key=lambda kv: (-kv[1], kv[0]))),
+            "by_priority": dict(sorted(by_priority.items())),
+        }
+
+    def stats(self, *,
+              as_of: Optional[date] = None) -> dict:
+        today = as_of or date.today()
+        all_actions = self.list_actions()
+        by_status: dict[str, int] = {}
+        by_priority: dict[str, int] = {}
+        for a in all_actions:
+            by_status[a["status"]] = by_status.get(a["status"], 0) + 1
+            p = (a.get("priority") or "P2").upper()
+            by_priority[p] = by_priority.get(p, 0) + 1
+        return {
+            "as_of": today.isoformat(),
+            "meetings": len(self.list_meetings()),
+            "decisions": len(self.list_decisions()),
+            "actions": len(all_actions),
+            "by_status": by_status,
+            "by_priority": by_priority,
+            "overdue_count": len(self.list_actions(overdue=True, as_of=today)),
+            "unassigned_count": len(self.list_actions(unassigned=True)),
         }
 
     def search(self, query: str, limit: int = 30) -> dict[str, list[dict]]:
@@ -330,16 +408,18 @@ class DecisionStore:
                 ).fetchall()
             ]
             actions = [
-                dict(r)
+                self._row_action(r)
                 for r in conn.execute(
                     """
                     SELECT a.*, m.title AS meeting_title
                     FROM action_items a JOIN meetings m ON a.meeting_id = m.id
                     WHERE a.text LIKE ? OR IFNULL(a.owner, '') LIKE ?
                        OR IFNULL(a.evidence, '') LIKE ?
+                       OR IFNULL(a.tags, '') LIKE ?
+                       OR IFNULL(a.notes, '') LIKE ?
                     ORDER BY a.created_at DESC LIMIT ?
                     """,
-                    (q, q, q, limit),
+                    (q, q, q, q, q, limit),
                 ).fetchall()
             ]
             meetings = [
@@ -373,7 +453,7 @@ class DecisionStore:
                 "WHERE a.id = ?",
                 (item_id,),
             ).fetchone()
-            return dict(row) if row else None
+            return self._row_action(row) if row else None
 
     def resolve_id(self, short_or_full: str, kind: str) -> Optional[dict]:
         if kind == "decision":
@@ -405,19 +485,33 @@ class DecisionStore:
             )
             return cur.rowcount > 0
 
-    def update_action_status(
+    def update_action(
         self,
         item_id: str,
+        *,
         status: Optional[str] = None,
         owner: Optional[str] = None,
+        priority: Optional[str] = None,
+        due_date: Optional[date | str] = None,
+        clear_due: bool = False,
+        tags: Optional[list[str]] = None,
+        notes: Optional[str] = None,
+        append_note: Optional[str] = None,
     ) -> bool:
+        """Flexible action updater used by done/due/priority/tag/note commands."""
         if status:
             try:
                 ActionStatus(status)
             except ValueError:
                 return False
+        if priority:
+            try:
+                ActionPriority(priority.upper())
+                priority = priority.upper()
+            except ValueError:
+                return False
 
-        sets = []
+        sets: list[str] = []
         params: list = []
         if status:
             sets.append("status = ?")
@@ -425,6 +519,35 @@ class DecisionStore:
         if owner is not None:
             sets.append("owner = ?")
             params.append(owner if owner else None)
+        if priority:
+            sets.append("priority = ?")
+            params.append(priority)
+        if clear_due:
+            sets.append("due_date = NULL")
+            sets.append("due_text = NULL")
+        elif due_date is not None:
+            if isinstance(due_date, date):
+                iso = due_date.isoformat()
+            else:
+                iso = str(due_date)[:10]
+            sets.append("due_date = ?")
+            params.append(iso)
+        if tags is not None:
+            sets.append("tags = ?")
+            params.append(_tags_to_str(tags))
+        if notes is not None:
+            sets.append("notes = ?")
+            params.append(notes)
+        if append_note:
+            existing = self.get_action(item_id)
+            if not existing:
+                return False
+            stamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M")
+            prev = (existing.get("notes") or "").rstrip()
+            line = f"[{stamp}] {append_note.strip()}"
+            merged = f"{prev}\n{line}".strip() if prev else line
+            sets.append("notes = ?")
+            params.append(merged)
 
         if not sets:
             return False
@@ -439,6 +562,14 @@ class DecisionStore:
                 params,
             )
             return cur.rowcount > 0
+
+    def update_action_status(
+        self,
+        item_id: str,
+        status: Optional[str] = None,
+        owner: Optional[str] = None,
+    ) -> bool:
+        return self.update_action(item_id, status=status, owner=owner)
 
     def export_markdown(self) -> str:
         meetings = self.list_meetings()
@@ -467,11 +598,16 @@ class DecisionStore:
                 for a in actions:
                     owner = a.get("owner") or "unassigned"
                     due = a.get("due_date") or a.get("due_text") or "—"
+                    pri = a.get("priority") or "P2"
+                    tag_s = ", ".join(a.get("tags") or []) or "—"
                     lines.append(
-                        f"- **[{a['status']}]** [{owner}] {a['text']} (due: {due})"
+                        f"- **[{a['status']}|{pri}]** [{owner}] {a['text']} "
+                        f"(due: {due}; tags: {tag_s})"
                     )
                     if a.get("evidence"):
                         lines.append(f"  - _{a['evidence']}_")
+                    if a.get("notes"):
+                        lines.append(f"  - notes: {a['notes']}")
                 lines.append("")
 
             lines.append("---\n")
