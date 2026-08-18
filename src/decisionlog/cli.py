@@ -367,7 +367,7 @@ def due_cmd(
         try:
             d = date.fromisoformat(due_date.strip())
         except ValueError:
-            console.print("[red]Due date must be YYYY-MM-DD or -[red]")
+            console.print("[red]Due date must be YYYY-MM-DD or -[/red]")
             raise typer.Exit(1)
         ok = store.update_action(item["id"], due_date=d)
         label = d.isoformat()
