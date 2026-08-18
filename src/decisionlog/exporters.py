@@ -3,7 +3,6 @@ from __future__ import annotations
 import csv
 import io
 from datetime import date, datetime, timedelta
-from typing import Optional
 
 
 def _ics_escape(text: str) -> str:
@@ -36,7 +35,6 @@ def actions_to_ics(
         due = a.get("due_date")
         if not due:
             continue
-        # due_date stored as ISO date string
         if isinstance(due, date):
             start = due
         else:
@@ -50,9 +48,12 @@ def actions_to_ics(
         owner = a.get("owner") or "unassigned"
         meeting = a.get("meeting_title") or ""
         status = a.get("status") or ""
-        desc = f"Owner: {owner}\nStatus: {status}\nMeeting: {meeting}"
+        priority = a.get("priority") or "P2"
+        desc = f"Owner: {owner}\nStatus: {status}\nPriority: {priority}\nMeeting: {meeting}"
         if a.get("evidence"):
             desc += f"\nEvidence: {a['evidence']}"
+        if a.get("notes"):
+            desc += f"\nNotes: {a['notes']}"
 
         lines.extend(
             [
@@ -80,6 +81,9 @@ def actions_to_csv(actions: list[dict]) -> str:
         "due_date",
         "due_text",
         "status",
+        "priority",
+        "tags",
+        "notes",
         "meeting_title",
         "confidence",
         "evidence",
@@ -87,7 +91,11 @@ def actions_to_csv(actions: list[dict]) -> str:
     writer = csv.DictWriter(buf, fieldnames=fields, extrasaction="ignore")
     writer.writeheader()
     for a in actions:
-        writer.writerow({k: a.get(k, "") for k in fields})
+        row = {k: a.get(k, "") for k in fields}
+        tags = a.get("tags") or []
+        if isinstance(tags, list):
+            row["tags"] = ",".join(tags)
+        writer.writerow(row)
     return buf.getvalue()
 
 
