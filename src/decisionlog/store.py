@@ -25,6 +25,10 @@ def _tags_from_str(raw: str | None) -> list[str]:
     return [t for t in (x.strip() for x in raw.split(",")) if t]
 
 
+def _action_priority(action: dict) -> str:
+    return (action.get("priority") or "P2").upper()
+
+
 class DecisionStore:
     def __init__(self, db_path: Path | str = DEFAULT_DB):
         self.db_path = Path(db_path)
@@ -335,6 +339,28 @@ class DecisionStore:
             ).fetchall()
             return [dict(r) for r in rows]
 
+    def recent_decisions(
+        self,
+        *,
+        since: date,
+        status: str = "decided",
+        limit: int = 20,
+    ) -> list[dict]:
+        """Decisions created on/after since (ISO date on created_at)."""
+        rows = self.list_decisions(status=status)
+        out: list[dict] = []
+        for d in rows:
+            created = str(d.get("created_at") or "")[:10]
+            try:
+                created_d = date.fromisoformat(created)
+            except ValueError:
+                continue
+            if created_d >= since:
+                out.append(d)
+            if len(out) >= limit:
+                break
+        return out
+
     def digest(
         self,
         *,
@@ -342,6 +368,7 @@ class DecisionStore:
         as_of: Optional[date] = None,
     ) -> dict:
         today = as_of or date.today()
+        window_start = today - timedelta(days=max(due_within_days, 0))
         open_actions = self.list_actions(status="open")
         in_progress = self.list_actions(status="in_progress")
         overdue = self.list_actions(overdue=True, as_of=today)
@@ -349,24 +376,33 @@ class DecisionStore:
         unassigned = self.list_actions(unassigned=True)
         decisions = self.list_decisions(status="decided")
         meetings = self.list_meetings()
+        recent = self.recent_decisions(since=window_start)
 
         by_owner: dict[str, int] = {}
         by_priority: dict[str, int] = {}
         for a in open_actions + in_progress:
             key = (a.get("owner") or "(unassigned)").strip() or "(unassigned)"
             by_owner[key] = by_owner.get(key, 0) + 1
-            p = (a.get("priority") or "P2").upper()
+            p = _action_priority(a)
             by_priority[p] = by_priority.get(p, 0) + 1
+
+        critical = [a for a in overdue if _action_priority(a) in {"P0", "P1"}]
+        p0_open = [a for a in open_actions + in_progress if _action_priority(a) == "P0"]
 
         return {
             "as_of": today.isoformat(),
+            "window_start": window_start.isoformat(),
+            "window_days": due_within_days,
             "meetings": len(meetings),
             "decisions_decided": len(decisions),
             "actions_open": len(open_actions),
             "actions_in_progress": len(in_progress),
             "overdue": overdue,
+            "critical": critical,
+            "p0_open": p0_open,
             "due_soon": due_soon,
             "unassigned": unassigned,
+            "recent_decisions": recent,
             "by_owner": dict(sorted(by_owner.items(), key=lambda kv: (-kv[1], kv[0]))),
             "by_priority": dict(sorted(by_priority.items())),
         }
@@ -379,7 +415,7 @@ class DecisionStore:
         by_priority: dict[str, int] = {}
         for a in all_actions:
             by_status[a["status"]] = by_status.get(a["status"], 0) + 1
-            p = (a.get("priority") or "P2").upper()
+            p = _action_priority(a)
             by_priority[p] = by_priority.get(p, 0) + 1
         return {
             "as_of": today.isoformat(),
