@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import uuid
 from datetime import date
 from pathlib import Path
@@ -10,6 +11,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
+from .digest import format_digest_markdown, format_digest_slack
 from .exporters import actions_to_csv, actions_to_ics
 from .extractor import extract
 from .store import DecisionStore
@@ -258,17 +260,47 @@ def list_cmd(
 
 @app.command("digest")
 def digest_cmd(
-    days: int = typer.Option(7, "--days", "-n", help="Due-soon window in days"),
+    days: int = typer.Option(7, "--days", "-n", help="Due-soon / recency window in days"),
+    format: str = typer.Option(
+        "rich",
+        "--format",
+        "-f",
+        help="rich | md | slack | json — md/slack are paste-ready standup artifacts",
+    ),
+    output: Optional[Path] = typer.Option(
+        None, "--output", "-o", help="Write md/slack/json to a file"
+    ),
     db: Optional[Path] = typer.Option(None, "--db"),
 ):
-    """Daily-style summary: overdue, due soon, unassigned, load by owner."""
+    """Weekly standup digest: critical overdue, due soon, unassigned, owner load."""
     store = _store(db)
     d = store.digest(due_within_days=days)
+    fmt = format.lower().strip()
+
+    if fmt == "md":
+        content = format_digest_markdown(d, days=days)
+    elif fmt == "slack":
+        content = format_digest_slack(d, days=days)
+    elif fmt == "json":
+        content = json.dumps(d, indent=2, default=str) + "\n"
+    elif fmt == "rich":
+        content = None
+    else:
+        console.print("[red]--format must be rich, md, slack, or json[/red]")
+        raise typer.Exit(1)
+
+    if content is not None:
+        if output:
+            output.write_text(content, encoding="utf-8")
+            console.print(f"[green]Wrote[/green] {output}")
+        else:
+            console.print(content, highlight=False)
+        return
 
     pri_bits = " · ".join(f"{k} {v}" for k, v in d.get("by_priority", {}).items()) or "—"
     console.print(
         Panel.fit(
-            f"[bold]DecisionLog digest[/bold]  ·  {d['as_of']}\n"
+            f"[bold]DecisionLog digest[/bold]  ·  {d.get('window_start', '?')} → {d['as_of']}\n"
             f"Meetings {d['meetings']}  ·  Decided {d['decisions_decided']}  ·  "
             f"Open {d['actions_open']}  ·  In progress {d['actions_in_progress']}\n"
             f"Priority mix: {pri_bits}",
@@ -282,11 +314,17 @@ def digest_cmd(
             console.print(f"  {name}: {count}")
 
     console.print()
+    _print_actions(d.get("critical") or [], "Critical (P0/P1 overdue)")
+    console.print()
     _print_actions(d["overdue"], "Overdue")
     console.print()
     _print_actions(d["due_soon"], f"Due within {days} day(s)")
     console.print()
     _print_actions(d["unassigned"], "Unassigned")
+    if d.get("recent_decisions"):
+        console.print("\n[bold]Decisions this window[/bold]")
+        for dec in d["recent_decisions"]:
+            console.print(f"  • {dec['text']}  [dim]{dec.get('meeting_title', '')}[/dim]")
 
 
 @app.command("stats")
@@ -365,12 +403,12 @@ def due_cmd(
         label = "(cleared)"
     else:
         try:
-            d = date.fromisoformat(due_date.strip())
+            parsed = date.fromisoformat(due_date.strip())
         except ValueError:
             console.print("[red]Due date must be YYYY-MM-DD or -[/red]")
             raise typer.Exit(1)
-        ok = store.update_action(item["id"], due_date=d)
-        label = d.isoformat()
+        ok = store.update_action(item["id"], due_date=parsed)
+        label = parsed.isoformat()
     if not ok:
         console.print("[red]Failed to update due date[/red]")
         raise typer.Exit(1)
