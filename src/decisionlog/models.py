@@ -18,8 +18,10 @@ class DecisionStatus(str, Enum):
 class ActionStatus(str, Enum):
     OPEN = "open"
     IN_PROGRESS = "in_progress"
+    BLOCKED = "blocked"
     DONE = "done"
     CANCELLED = "cancelled"
+    ARCHIVED = "archived"
 
 
 class ActionPriority(str, Enum):
@@ -51,6 +53,7 @@ class ActionItem(BaseModel):
     priority: ActionPriority = ActionPriority.P2
     tags: list[str] = Field(default_factory=list)
     notes: Optional[str] = None
+    blocked_reason: Optional[str] = None
     evidence: Optional[str] = None
     confidence: float = Field(0.8, ge=0.0, le=1.0)
     linked_decision_id: Optional[str] = None
