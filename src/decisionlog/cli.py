@@ -11,9 +11,12 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
-from .digest import format_digest_markdown, format_digest_slack
+from .dates import snooze_date
+from .digest import format_digest_markdown, format_digest_slack, format_today_markdown
 from .exporters import actions_to_csv, actions_to_ics
 from .extractor import extract
+from .html_digest import format_digest_html, write_digest_html
+from .importer import import_actions_csv
 from .store import DecisionStore
 
 app = typer.Typer(
@@ -141,6 +144,7 @@ def extract_cmd(
         result,
         meeting_date=ref_date,
         replace_existing=replace,
+        source_path=str(file),
     )
 
     action = "Updated" if (existing and replace) else "Saved"
@@ -181,6 +185,7 @@ def list_cmd(
     unassigned: bool = typer.Option(
         False, "--unassigned", help="Only open actions with no owner"
     ),
+    blocked: bool = typer.Option(False, "--blocked", help="Only blocked actions"),
     priority: Optional[str] = typer.Option(
         None, "--priority", "-p", help="Filter by priority P0|P1|P2|P3"
     ),
@@ -220,9 +225,12 @@ def list_cmd(
             unassigned=unassigned,
             priority=priority,
             tag=tag,
+            blocked_only=blocked,
         )
         if overdue:
             title = "Overdue action items"
+        elif blocked:
+            title = "Blocked action items"
         elif due_soon is not None:
             title = f"Due within {due_soon} day(s)"
         elif unassigned:
@@ -265,10 +273,10 @@ def digest_cmd(
         "rich",
         "--format",
         "-f",
-        help="rich | md | slack | json — md/slack are paste-ready standup artifacts",
+        help="rich | md | slack | html | json — md/slack/html are paste-ready standup artifacts",
     ),
     output: Optional[Path] = typer.Option(
-        None, "--output", "-o", help="Write md/slack/json to a file"
+        None, "--output", "-o", help="Write md/slack/html/json to a file"
     ),
     db: Optional[Path] = typer.Option(None, "--db"),
 ):
@@ -281,17 +289,22 @@ def digest_cmd(
         content = format_digest_markdown(d, days=days)
     elif fmt == "slack":
         content = format_digest_slack(d, days=days)
+    elif fmt == "html":
+        content = format_digest_html(d, days=days)
     elif fmt == "json":
         content = json.dumps(d, indent=2, default=str) + "\n"
     elif fmt == "rich":
         content = None
     else:
-        console.print("[red]--format must be rich, md, slack, or json[/red]")
+        console.print("[red]--format must be rich, md, slack, html, or json[/red]")
         raise typer.Exit(1)
 
     if content is not None:
         if output:
-            output.write_text(content, encoding="utf-8")
+            if fmt == "html":
+                write_digest_html(d, output, days=days)
+            else:
+                output.write_text(content, encoding="utf-8")
             console.print(f"[green]Wrote[/green] {output}")
         else:
             console.print(content, highlight=False)
@@ -302,7 +315,8 @@ def digest_cmd(
         Panel.fit(
             f"[bold]DecisionLog digest[/bold]  ·  {d.get('window_start', '?')} → {d['as_of']}\n"
             f"Meetings {d['meetings']}  ·  Decided {d['decisions_decided']}  ·  "
-            f"Open {d['actions_open']}  ·  In progress {d['actions_in_progress']}\n"
+            f"Open {d['actions_open']}  ·  In progress {d['actions_in_progress']}  ·  "
+            f"Blocked {d.get('actions_blocked', 0)}\n"
             f"Priority mix: {pri_bits}",
             border_style="cyan",
         )
@@ -316,15 +330,58 @@ def digest_cmd(
     console.print()
     _print_actions(d.get("critical") or [], "Critical (P0/P1 overdue)")
     console.print()
+    _print_actions(d.get("due_today") or [], "Due today")
+    console.print()
     _print_actions(d["overdue"], "Overdue")
     console.print()
     _print_actions(d["due_soon"], f"Due within {days} day(s)")
     console.print()
     _print_actions(d["unassigned"], "Unassigned")
+    if d.get("stale"):
+        console.print()
+        _print_actions(d["stale"][:20], "Stale (no recent update)")
+    if d.get("completed"):
+        console.print()
+        _print_actions(d["completed"][:15], "Completed this window")
     if d.get("recent_decisions"):
         console.print("\n[bold]Decisions this window[/bold]")
         for dec in d["recent_decisions"]:
             console.print(f"  • {dec['text']}  [dim]{dec.get('meeting_title', '')}[/dim]")
+
+
+@app.command("today")
+def today_cmd(
+    owner: str = typer.Argument(..., help="Owner name for personal board"),
+    format: str = typer.Option("rich", "--format", "-f", help="rich | md"),
+    output: Optional[Path] = typer.Option(None, "--output", "-o"),
+    db: Optional[Path] = typer.Option(None, "--db"),
+):
+    """Personal board: overdue, due today, blocked, in progress for one owner."""
+    store = _store(db)
+    board = store.today_board(owner)
+    if format.lower() == "md":
+        content = format_today_markdown(board)
+        if output:
+            output.write_text(content, encoding="utf-8")
+            console.print(f"[green]Wrote[/green] {output}")
+        else:
+            console.print(content, highlight=False)
+        return
+    console.print(
+        Panel.fit(
+            f"[bold]Today · {owner}[/bold]  ·  {board['as_of']}",
+            border_style="green",
+        )
+    )
+    for title, key in (
+        ("Overdue", "overdue"),
+        ("Due today", "due_today"),
+        ("Blocked", "blocked"),
+        ("In progress", "in_progress"),
+        ("Open", "open"),
+    ):
+        console.print()
+        _print_actions(board.get(key) or [], title)
 
 
 @app.command("stats")
@@ -338,7 +395,9 @@ def stats_cmd(
         Panel.fit(
             f"[bold]DecisionLog stats[/bold]  ·  {s['as_of']}\n"
             f"Meetings {s['meetings']}  ·  Decisions {s['decisions']}  ·  Actions {s['actions']}\n"
-            f"Overdue {s['overdue_count']}  ·  Unassigned {s['unassigned_count']}",
+            f"Overdue {s['overdue_count']}  ·  Unassigned {s['unassigned_count']}  ·  "
+            f"Blocked {s.get('blocked_count', 0)}  ·  Done 7d {s.get('completed_7d', 0)}  ·  "
+            f"Stale 14d {s.get('stale_14d', 0)}",
             border_style="magenta",
         )
     )
@@ -350,6 +409,35 @@ def stats_cmd(
         console.print("[bold]By priority[/bold]")
         for k, v in sorted(s["by_priority"].items()):
             console.print(f"  {k}: {v}")
+
+
+@app.command("history")
+def history_cmd(
+    item_id: Optional[str] = typer.Argument(None, help="Optional entity id prefix"),
+    limit: int = typer.Option(30, "--limit", "-n"),
+    db: Optional[Path] = typer.Option(None, "--db"),
+):
+    """Show activity log (status changes, assigns, notes)."""
+    store = _store(db)
+    rows = store.list_activity(entity_id=item_id, limit=limit)
+    if not rows:
+        console.print("[dim]No activity yet.[/dim]")
+        return
+    table = Table(title="Activity")
+    table.add_column("When", style="dim")
+    table.add_column("Type")
+    table.add_column("ID", max_width=8)
+    table.add_column("Action")
+    table.add_column("Detail")
+    for r in rows:
+        table.add_row(
+            str(r.get("created_at") or "")[:19],
+            r.get("entity_type") or "",
+            str(r.get("entity_id") or "")[:8],
+            r.get("action") or "",
+            (r.get("detail") or "")[:80],
+        )
+    console.print(table)
 
 
 @app.command("done")
@@ -367,6 +455,96 @@ def done_cmd(
         console.print("[red]Failed to update[/red]")
         raise typer.Exit(1)
     console.print(f"[green]Done[/green] {item['id'][:8]} — {item['text']}")
+
+
+@app.command("block")
+def block_cmd(
+    item_id: str = typer.Argument(..., help="Action id (prefix ok)"),
+    reason: str = typer.Argument(..., help="Why this is blocked"),
+    db: Optional[Path] = typer.Option(None, "--db"),
+):
+    """Mark an action blocked with a reason."""
+    store = _store(db)
+    item = store.resolve_id(item_id, "action")
+    if not item:
+        console.print(f"[red]Action not found: {item_id}[/red]")
+        raise typer.Exit(1)
+    if not store.update_action(item["id"], status="blocked", blocked_reason=reason):
+        console.print("[red]Failed to block[/red]")
+        raise typer.Exit(1)
+    console.print(f"[yellow]Blocked[/yellow] {item['id'][:8]} — {reason}")
+
+
+@app.command("unblock")
+def unblock_cmd(
+    item_id: str = typer.Argument(..., help="Action id (prefix ok)"),
+    db: Optional[Path] = typer.Option(None, "--db"),
+):
+    """Clear blocked status (back to open)."""
+    store = _store(db)
+    item = store.resolve_id(item_id, "action")
+    if not item:
+        console.print(f"[red]Action not found: {item_id}[/red]")
+        raise typer.Exit(1)
+    if not store.update_action(
+        item["id"], status="open", clear_blocked_reason=True
+    ):
+        console.print("[red]Failed to unblock[/red]")
+        raise typer.Exit(1)
+    console.print(f"[green]Unblocked[/green] {item['id'][:8]}")
+
+
+@app.command("snooze")
+def snooze_cmd(
+    item_id: str = typer.Argument(..., help="Action id (prefix ok)"),
+    days: int = typer.Argument(1, help="Days to push the due date"),
+    db: Optional[Path] = typer.Option(None, "--db"),
+):
+    """Push due date forward by N days (from today if overdue)."""
+    store = _store(db)
+    item = store.resolve_id(item_id, "action")
+    if not item:
+        console.print(f"[red]Action not found: {item_id}[/red]")
+        raise typer.Exit(1)
+    current = None
+    if item.get("due_date"):
+        try:
+            current = date.fromisoformat(str(item["due_date"])[:10])
+        except ValueError:
+            current = None
+    new_due = snooze_date(current, days=days)
+    if not store.update_action(item["id"], due_date=new_due):
+        console.print("[red]Failed to snooze[/red]")
+        raise typer.Exit(1)
+    console.print(f"[green]Snoozed[/green] {item['id'][:8]} → {new_due.isoformat()}")
+
+
+@app.command("archive")
+def archive_cmd(
+    older_than: int = typer.Option(
+        30, "--older-than", help="Archive done items updated at least N days ago"
+    ),
+    db: Optional[Path] = typer.Option(None, "--db"),
+):
+    """Archive done actions older than N days."""
+    store = _store(db)
+    n = store.archive_done(older_than_days=older_than)
+    console.print(f"[green]Archived[/green] {n} action(s)")
+
+
+@app.command("import-csv")
+def import_csv_cmd(
+    file: Path = typer.Argument(..., help="CSV with text,owner,due_date,priority,tags,status"),
+    meeting: str = typer.Option("CSV import", "--meeting", "-m"),
+    db: Optional[Path] = typer.Option(None, "--db"),
+):
+    """Import actions from a CSV file into a synthetic meeting."""
+    if not file.exists():
+        console.print(f"[red]File not found: {file}[/red]")
+        raise typer.Exit(1)
+    store = _store(db)
+    mid, n = import_actions_csv(store, file, meeting_title=meeting)
+    console.print(f"[green]Imported[/green] {n} action(s) under meeting {meeting} ({mid[:8]})")
 
 
 @app.command("reopen")
@@ -559,6 +737,8 @@ def show_cmd(
         body_lines.insert(4, f"Priority   : {item.get('priority') or 'P2'}")
         tags = ", ".join(item.get("tags") or []) or "—"
         body_lines.insert(5, f"Tags       : {tags}")
+        if item.get("blocked_reason"):
+            body_lines.insert(6, f"Blocked    : {item['blocked_reason']}")
         if item.get("notes"):
             body_lines.extend(["", f"Notes      :\n{item['notes']}"])
     if item.get("evidence"):
@@ -594,7 +774,7 @@ def status_cmd(
         ok = store.update_action(item["id"], status=new_status, owner=owner)
         if not ok:
             console.print(
-                "[red]Invalid status. Use: open | in_progress | done | cancelled[/red]"
+                "[red]Invalid status. Use: open | in_progress | blocked | done | cancelled | archived[/red]"
             )
             raise typer.Exit(1)
         extra = f" (owner → {owner})" if owner is not None else ""
@@ -643,7 +823,7 @@ def export_cmd(
     open_only: bool = typer.Option(
         False,
         "--open-only",
-        help="For csv/ics: only open + in_progress actions",
+        help="For csv/ics: only open + in_progress + blocked actions",
     ),
     db: Optional[Path] = typer.Option(None, "--db"),
 ):
@@ -655,14 +835,14 @@ def export_cmd(
     elif format == "json":
         content = store.export_json()
     elif format == "csv":
-        actions = store.list_actions()
+        actions = store.list_actions(include_closed=True)
         if open_only:
-            actions = [a for a in actions if a["status"] in ("open", "in_progress")]
+            actions = [a for a in actions if a["status"] in ("open", "in_progress", "blocked")]
         content = actions_to_csv(actions)
     elif format == "ics":
-        actions = store.list_actions()
+        actions = store.list_actions(include_closed=True)
         if open_only:
-            actions = [a for a in actions if a["status"] in ("open", "in_progress")]
+            actions = [a for a in actions if a["status"] in ("open", "in_progress", "blocked")]
         content = actions_to_ics(actions)
     else:
         console.print("[red]--format must be md, json, csv, or ics[/red]")
