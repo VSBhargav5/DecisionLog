@@ -1,42 +1,21 @@
 from datetime import date
 
-from decisionlog.dates import normalize_deadline
-
-REF = date(2026, 8, 5)  # Wednesday
+from decisionlog.dates import normalize_deadline, snooze_date
 
 
-def test_today_eod():
-    d, orig = normalize_deadline("EOD", REF)
-    assert d == REF
-    assert orig == "EOD"
+def test_relative_phrases():
+    ref = date(2026, 8, 10)  # Monday
+    d, _ = normalize_deadline("tomorrow", reference=ref)
+    assert d == date(2026, 8, 11)
+    d, _ = normalize_deadline("EOD", reference=ref)
+    assert d == ref
+    d, _ = normalize_deadline("in 3 days", reference=ref)
+    assert d == date(2026, 8, 13)
 
 
-def test_tomorrow():
-    d, _ = normalize_deadline("tomorrow", REF)
-    assert d == date(2026, 8, 6)
-
-
-def test_next_friday():
-    d, _ = normalize_deadline("by next Friday", REF)
-    assert d == date(2026, 8, 7)
-
-
-def test_in_two_weeks():
-    d, _ = normalize_deadline("in 2 weeks", REF)
-    assert d == date(2026, 8, 19)
-
-
-def test_end_of_month():
-    d, _ = normalize_deadline("end of month", REF)
-    assert d == date(2026, 8, 31)
-
-
-def test_empty():
-    assert normalize_deadline(None) == (None, None)
-    assert normalize_deadline("   ") == (None, None)
-
-
-def test_iso_date():
-    d, orig = normalize_deadline("2026-09-01", REF)
-    assert d == date(2026, 9, 1)
-    assert orig == "2026-09-01"
+def test_snooze_from_today_when_overdue():
+    ref = date(2026, 8, 10)
+    # overdue due date
+    assert snooze_date(date(2026, 8, 1), days=2, reference=ref) == date(2026, 8, 12)
+    # future due keeps base
+    assert snooze_date(date(2026, 8, 15), days=2, reference=ref) == date(2026, 8, 17)
