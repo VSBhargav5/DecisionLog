@@ -50,6 +50,8 @@ def actions_to_ics(
         status = a.get("status") or ""
         priority = a.get("priority") or "P2"
         desc = f"Owner: {owner}\nStatus: {status}\nPriority: {priority}\nMeeting: {meeting}"
+        if a.get("blocked_reason"):
+            desc += f"\nBlocked: {a['blocked_reason']}"
         if a.get("evidence"):
             desc += f"\nEvidence: {a['evidence']}"
         if a.get("notes"):
@@ -84,6 +86,7 @@ def actions_to_csv(actions: list[dict]) -> str:
         "priority",
         "tags",
         "notes",
+        "blocked_reason",
         "meeting_title",
         "confidence",
         "evidence",
