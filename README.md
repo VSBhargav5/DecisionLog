@@ -3,9 +3,9 @@
 **Turn messy meeting notes into a living decision log.**
 
 Most meeting tools capture *what was said*.  
-DecisionLog captures **what was decided**, **who owns it**, **when it is due**, and **what is still blocking this week** — then hands you a paste-ready standup digest.
+DecisionLog captures **what was decided**, **who owns it**, **when it is due**, and **what is still blocking this week** — then hands you paste-ready standup artifacts and a personal **today** board.
 
-**Current version: 0.7.0**
+**Current version: 0.8.0**
 
 ---
 
@@ -17,22 +17,24 @@ After almost every meeting:
 - Action items lack clear ownership
 - Deadlines are vague (“next week”) or missing
 - Monday standup has no single artifact of *what is still true*
+- Nobody knows what is **blocked**, **stale**, or **due today for me**
 
-DecisionLog is the overlooked middle layer: extract decisions + owned actions, then **keep the log honest** with a weekly digest people actually paste.
+DecisionLog is the overlooked middle layer: extract decisions + owned actions, keep the log honest with digests people actually paste, and give each person a board for the day.
 
 ---
 
-## What it does
+## What it does (v0.8)
 
-1. Takes meeting notes / transcript
+1. Takes meeting notes / transcript (or **CSV import**)
 2. Extracts **decisions** and **action items** (owners, deadlines, evidence, confidence)
-3. **Normalizes relative deadlines** (`by next Friday`, `EOD`, `end of month`, …)
-4. Stores everything in local SQLite
-5. Day-to-day: **digest · done · due · priority · tag · note · assign · stats**
-6. **Weekly digest** — critical P0/P1 overdue, due soon, unassigned, owner load, decisions this window  
-   Formats: terminal · **Markdown** · **Slack** · JSON
-7. Export **Markdown · JSON · CSV · ICS**
-8. Any **OpenAI-compatible** provider via `--base-url`
+3. **Normalizes relative deadlines** (`by next Friday`, `EOD`, …) + **snooze**
+4. Stores everything in local SQLite with an **activity log**
+5. Day-to-day: **digest · today · block · snooze · history · archive**
+6. **Weekly digest** — critical P0/P1, due today, stale, completed this window, owner load  
+   Formats: terminal · **Markdown** · **Slack** · **HTML** · JSON
+7. **Today board** — personal overdue / due today / blocked / in progress
+8. Export **Markdown · JSON · CSV · ICS**
+9. Optional `~/.decisionlog/config.json` for **owner aliases**
 
 ---
 
@@ -49,41 +51,43 @@ python -m decisionlog extract examples/sample_meeting.txt \
   -m "Sprint Planning 31 Jul" --date 2026-07-31
 ```
 
-### The weekly artifact (v0.7)
+### Weekly artifact
 
 ```bash
-# Terminal
 python -m decisionlog digest --days 7
-
-# Paste into Notion / email
 python -m decisionlog digest -f md -o standup.md
-
-# Paste into Slack
 python -m decisionlog digest -f slack
+python -m decisionlog digest -f html -o standup.html
 ```
 
-### Day-to-day
+### Personal today board
 
 ```bash
-python -m decisionlog list actions --overdue
-python -m decisionlog list actions --priority P0
-python -m decisionlog done <id>
-python -m decisionlog due <id> 2026-08-22
-python -m decisionlog priority <id> P0
-python -m decisionlog assign <id> Sarah
-python -m decisionlog export -f ics -o actions.ics --open-only
+python -m decisionlog today Sarah
+python -m decisionlog today Sarah -f md -o my-day.md
+```
+
+### Flow control
+
+```bash
+python -m decisionlog block <id> "waiting on legal"
+python -m decisionlog unblock <id>
+python -m decisionlog snooze <id> 3
+python -m decisionlog history
+python -m decisionlog archive --older-than 30
+python -m decisionlog import-csv examples/actions_import.csv -m "Backlog import"
 ```
 
 ---
 
 ## Status
 
-**v0.7.0** — weekly digest as a first-class artifact (`md` / `slack` / `json`), critical P0/P1 slice  
-**v0.6.0** — priority, tags, notes, `done` / `due` / `priority` / `tag` / `note` / `reopen` / `stats`  
+**v0.8.0** — today board, blocked/stale, activity history, HTML digest, CSV import, snooze, archive  
+**v0.7.0** — weekly digest as a first-class artifact (`md` / `slack` / `json`)  
+**v0.6.0** — priority, tags, notes, ops CLI  
 **v0.5.0** — assign, ICS / CSV export  
-**v0.4.0** — digest, due-soon, unassigned, delete-meeting  
-**v0.3.0** — overdue, search, offline tests, CI  
-**v0.2.x** — extract, replace, status, export, OpenAI-compatible base URL
+**v0.4.0** — digest, due-soon, unassigned  
+**v0.3.0** — overdue, search, offline tests, CI
 
 ---
 
