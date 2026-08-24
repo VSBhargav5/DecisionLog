@@ -72,6 +72,9 @@ def test_due_soon_unassigned_digest_delete(tmp_path: Path):
     assert len(d["overdue"]) == 1
     assert "Sarah" in d["by_owner"] or "Alex" in d["by_owner"]
     assert "by_priority" in d
+    assert "due_today" in d
+    assert "stale" in d
+    assert "completed" in d
 
     m = store.resolve_meeting("Sprint Planning")
     assert m
@@ -108,3 +111,37 @@ def test_priority_tags_notes_done_due_stats(tmp_path: Path):
     s = store.stats(as_of=date(2026, 8, 10))
     assert s["actions"] >= 3
     assert s["by_status"].get("done", 0) >= 1
+    assert "completed_7d" in s
+
+
+def test_activity_log_on_update(tmp_path: Path):
+    store = _store(tmp_path)
+    _seed(store)
+    aid = store.list_actions()[0]["id"]
+    store.update_action(aid, status="in_progress")
+    log = store.list_activity(entity_id=aid)
+    assert log
+    assert any(e["action"] == "update" for e in log)
+
+
+def test_blocked_and_today_board(tmp_path: Path):
+    store = _store(tmp_path)
+    _seed(store)
+    aid = next(a["id"] for a in store.list_actions() if a["owner"] == "Sarah")
+    assert store.update_action(aid, status="blocked", blocked_reason="waiting on legal")
+    item = store.get_action(aid)
+    assert item["status"] == "blocked"
+    assert "legal" in (item.get("blocked_reason") or "")
+    board = store.today_board("Sarah", as_of=date(2026, 8, 10))
+    assert board["blocked"]
+
+
+def test_archive_done(tmp_path: Path):
+    store = _store(tmp_path)
+    _seed(store)
+    aid = store.list_actions()[0]["id"]
+    store.update_action(aid, status="done")
+    # Force updated_at old via direct SQL is hard; archive with 0 days archives all done
+    n = store.archive_done(older_than_days=0, as_of=date(2026, 8, 20))
+    assert n >= 1
+    assert store.get_action(aid)["status"] == "archived"
