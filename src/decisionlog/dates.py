@@ -41,7 +41,6 @@ def normalize_deadline(
         return None, None
 
     text = due_text.strip().lower()
-    # Drop common prefixes so "by next Friday" still matches
     for prefix in ("by ", "before ", "due ", "deadline "):
         if text.startswith(prefix):
             text = text[len(prefix) :].strip()
@@ -89,3 +88,15 @@ def normalize_deadline(
         return parsed.date(), original
     except (ValueError, OverflowError, TypeError):
         return None, original
+
+
+def snooze_date(
+    current: Optional[date],
+    *,
+    days: int = 1,
+    reference: Optional[date] = None,
+) -> date:
+    """Push a due date forward by N days from max(current, today)."""
+    ref = reference or date.today()
+    base = current if current and current > ref else ref
+    return base + timedelta(days=max(days, 0))
