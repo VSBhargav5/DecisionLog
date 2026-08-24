@@ -1,57 +1,49 @@
-from decisionlog.digest import format_digest_markdown, format_digest_slack
+from datetime import date
+from pathlib import Path
+
+from decisionlog.digest import format_digest_markdown, format_today_markdown
+from decisionlog.html_digest import format_digest_html
+from decisionlog.models import ActionItem, ExtractionResult
+from decisionlog.store import DecisionStore
 
 
-def _sample() -> dict:
-    return {
-        "as_of": "2026-08-19",
-        "window_start": "2026-08-12",
-        "actions_open": 3,
-        "actions_in_progress": 1,
-        "overdue": [
-            {
-                "text": "Write release notes",
-                "owner": "Sarah",
-                "due_date": "2026-08-01",
-                "priority": "P0",
-            }
-        ],
-        "critical": [
-            {
-                "text": "Write release notes",
-                "owner": "Sarah",
-                "due_date": "2026-08-01",
-                "priority": "P0",
-            }
-        ],
-        "due_soon": [
-            {
-                "text": "Update docs",
-                "owner": "Alex",
-                "due_date": "2026-08-22",
-                "priority": "P2",
-            }
-        ],
-        "unassigned": [
-            {"text": "TBD cleanup", "owner": None, "due_date": None, "priority": "P3"}
-        ],
-        "recent_decisions": [{"text": "Ship v1 on Friday", "meeting_title": "Sprint"}],
-        "by_owner": {"Sarah": 2, "Alex": 1},
-    }
+def test_digest_markdown_sections(tmp_path: Path):
+    store = DecisionStore(tmp_path / "d.db")
+    result = ExtractionResult(
+        action_items=[
+            ActionItem(
+                meeting_id="m",
+                text="Fix login",
+                owner="Sam",
+                due_date=date(2026, 8, 1),
+                priority="P0",  # type: ignore[arg-type]
+            )
+        ]
+    )
+    # priority must be enum - fix
+    from decisionlog.models import ActionPriority
 
-
-def test_markdown_digest_has_critical_and_load():
-    md = format_digest_markdown(_sample(), days=7)
-    assert "# DecisionLog" in md
-    assert "2026-08-12" in md
+    result.action_items[0].priority = ActionPriority.P0
+    store.save_extraction("m", "M1", result, meeting_date=date(2026, 8, 1))
+    d = store.digest(due_within_days=7, as_of=date(2026, 8, 10))
+    md = format_digest_markdown(d, days=7)
     assert "Critical" in md
-    assert "Write release notes" in md
-    assert "Sarah: 2" in md
-    assert "Ship v1 on Friday" in md
+    assert "Fix login" in md
+    assert "Due today" in md
+    html = format_digest_html(d, days=7)
+    assert "<!DOCTYPE html>" in html
+    assert "Fix login" in html
 
 
-def test_slack_digest_is_pasteable():
-    text = format_digest_slack(_sample(), days=7)
-    assert text.startswith("*DecisionLog")
-    assert "Write release notes" in text
-    assert "Load:" in text
-    assert text.endswith("\n")
+def test_today_markdown():
+    board = {
+        "owner": "Sam",
+        "as_of": "2026-08-10",
+        "overdue": [{"text": "A", "priority": "P1", "owner": "Sam", "due_date": "2026-08-01"}],
+        "due_today": [],
+        "blocked": [],
+        "in_progress": [],
+        "open": [],
+    }
+    text = format_today_markdown(board)
+    assert "Today" in text and "Sam" in text and "Overdue" in text
